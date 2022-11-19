@@ -103,7 +103,7 @@ fn launcher_cli() -> clap::Command {
 }
 
 fn initial_cli() -> clap::Command {
-    clap::Command::new("easy-cli").version("0.1.0")
+    clap::Command::new("easy-cli").version("0.1.0").subcommand_required(true)
 }
 
 fn to_cli(model: &Model) -> clap::Command {
