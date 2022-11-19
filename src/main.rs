@@ -16,20 +16,21 @@ fn main() {
 
     let cli = to_cli(&model);
 
-    // cli.print_help().expect("Unable to print help");
-
-
     let mut cli_iter = args();
     cli_iter.next();
 
     let arg_matches = cli.get_matches_from(cli_iter);
 
-//    println!("{:?}", arg_matches);
+    let (script_to_call, matches) = arg_matches.subcommand().unwrap();
 
-    let script_to_call = arg_matches.subcommand().unwrap().0;
+    let args: Option<Vec<String>> = matches.get_raw("args").map(|values| {
+        values.map(|value| {
+            value.to_str().unwrap().to_owned()
+        }).collect()
+    });
 
     let command = model.commands.iter().find(|command|{command.name() == script_to_call}).unwrap();
-    command.exec();
+    command.exec(args);
 }
 
 fn initial_cli() -> clap::Command {

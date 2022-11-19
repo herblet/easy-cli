@@ -26,7 +26,7 @@ impl Model {
 pub trait Command {
     fn name(&self) -> &str;
 
-    fn exec(&self);
+    fn exec(&self, args: Option<Vec<String>>);
 }
 
 /// A single CLI command.
@@ -57,8 +57,16 @@ impl Command for ScriptCommand {
         self.name.as_str()
     }
 
-    fn exec(&self) {
-        let output = process::Command::new("sh").arg(self.path.clone()).spawn();
+    fn exec(&self, args: Option<Vec<String>>) {
+        let mut command = process::Command::new("sh");
+        
+        command.arg(self.path.clone());
+
+        args.iter().flat_map(|args| args.iter()).for_each(|arg| {
+            command.arg(arg);
+        });
+
+        let output = command.spawn();
 
         match output {
             Ok(mut child) => {
