@@ -1,9 +1,12 @@
 [package]
 name = "easy-cli"
-version = "0.1.0"
+version = "1.0.0"
+authors = ["Toby Grasl <herblet@knowledge42.com>"]
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "Builds CLI tools from a set of scripts."
+homepage = "https://github.com/herblet/easy-cli"
+license = "MIT"
+repository = "https://github.com/herblet/easy-cli"
 
 [dependencies]
 clap = { version = "4", features = [ "string" ] }
