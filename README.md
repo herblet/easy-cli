@@ -1,3 +1,4 @@
+[![Crates.io](https://img.shields.io/crates/v/easy-cli.svg)](https://crates.io/crates/easy-cli)
 # easy-cli
 A tool for building personal and team CLI tools.
 
