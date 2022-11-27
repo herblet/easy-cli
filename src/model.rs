@@ -1,7 +1,9 @@
-use std::{fs::read_dir, path::PathBuf, process::{self, exit}};
+use std::{fs::{read_dir, File}, path::PathBuf, process::{self, exit}, io::BufReader};
 
 use lazy_static::lazy_static;
 use regex::Regex;
+
+use crate::parse::{doc_entries, DocEntry};
 
 pub struct Model {
     pub commands: Vec<Box<dyn Command>>,
@@ -23,16 +25,24 @@ impl Model {
     }
 }
 
+pub struct CommandDescription {
+    pub name: String,
+    pub description: Option<String>,
+    pub args: Vec<Box<Argument>>,
+    pub any_arg: bool,
+}
+
 pub trait Command {
-    fn name(&self) -> &str;
+    fn description(&self) -> &CommandDescription;
 
     fn exec(&self, args: Option<Vec<String>>);
 }
 
 /// A single CLI command.
 pub struct ScriptCommand {
-    pub name: String,
+    description: CommandDescription,
     path: PathBuf,
+   
 }
 
 impl ScriptCommand {
@@ -42,19 +52,40 @@ impl ScriptCommand {
         }
 
         let path_for_result = path.clone();
-    
+
+        let docs = doc_entries(BufReader::new(File::open(path.clone()).unwrap()));
+        
+        let mut description = None;
+        let mut args: Vec<Box<Argument>> = Vec::new();
+
+        let mut any_arg = false;
+        docs.into_iter().for_each({
+           |entry| match entry {
+               DocEntry::Description(desc) => description = Some(desc),
+               DocEntry::Option(name, has_arg , description) => args.push(Box::new(Argument::new(
+                   name,
+                   description,
+                   has_arg,
+                ))),
+                DocEntry::AnyArg => any_arg = true,
+               _ => ()
+           }
+        }); 
+
         path_for_result
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .map(|file_name| strip_file_suffix(&file_name))
-            .map(|name| ScriptCommand { name, path })
+            .map(|name| CommandDescription { name, description, args, any_arg })
+            .map(|description| ScriptCommand { description, path } )
             .ok_or(path_for_result)
     }
 }
 
 impl Command for ScriptCommand {
-    fn name(&self) -> &str {
-        self.name.as_str()
+   
+    fn description(&self) -> &CommandDescription {
+        &self.description
     }
 
     fn exec(&self, args: Option<Vec<String>>) {
@@ -80,6 +111,7 @@ impl Command for ScriptCommand {
             }
         }
     }
+
 }
 
 /// Strips the file type suffix -  that is, everything after the last '.' - from the given file name.
@@ -89,6 +121,18 @@ fn strip_file_suffix(name: &str) -> String {
     }
 
     FILE_SUFFIX.replace(&name, "").to_string()
+}
+
+pub struct Argument {
+    pub name: String,
+    pub description: String,
+    pub has_args: bool,
+}
+
+impl Argument {
+    pub fn new(name: String, description: String, has_args: bool) -> Argument {
+        Argument { name, description, has_args }
+    }
 }
 
 #[cfg(test)]

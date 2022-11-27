@@ -34,6 +34,14 @@ Hello, world!
 ```
 Arguments trailing the command will be passed to the relevant script.
 
+# Argument-Parsing
+
+easy-cli looks for metadata in the scripts regarding the command and arguments. Currently, the following patterns are recognised:
+
+- ```#@description <description>```: Used in the command line help text to describe the command.
+- ```#@argument <argname> <has_args> <description>```: Defines an argument usable as "--argname". It may or may not have values (has_args), and can have a help text (description)
+- ```#@anyarg```: If present, allows the command to accept any argument. Otherwise, only the defined ones will be accepted.
+
 ## Completion
 
 easy-cli offers completion for your cli in a number of shells - those supported by [clap_complete](https://crates.io/crates/clap_complete). To generate completions for your cli, run:

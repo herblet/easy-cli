@@ -1,10 +1,11 @@
 use std::{io, process::exit, str::FromStr};
 
-use clap::{parser::ValuesRef, Arg};
+use clap::{parser::ValuesRef, Arg, ArgAction};
 use clap_complete::{generate, Shell};
-use model::Model;
+use model::{Argument, Command, Model};
 
 mod model;
+mod parse;
 
 const COMPLETIONS_ARG: &str = "completions";
 
@@ -14,6 +15,8 @@ const COMMAND_ARGS: &str = "command_args";
 
 const DEFAULT_CLI_NAME: &str = "cli";
 
+const REMAINING_ARGS: &str = "any_args";
+            
 fn main() {
     let (cli_source, cli_args, shell_for_completions) = extract_cli_source_and_args();
 
@@ -30,22 +33,27 @@ fn main() {
     } else {
         let arg_matches = cli.get_matches_from(cli_args.iter());
 
-        let (script_to_call, matches) = arg_matches.subcommand().unwrap();
+        let (script_to_call, _) = arg_matches.subcommand().unwrap();
 
-        let command = model
-            .commands
+        let command = find_command(&model, script_to_call);
+
+        let command_args: Vec<String> = cli_args
             .iter()
-            .find(|command| command.name() == script_to_call)
-            .unwrap();
+            .skip_while(|val| val != &&script_to_call)
+            .skip(1)
+            .map(|reference| reference.clone())
+            .collect();
 
-        let command_args: Option<Vec<String>> = matches.get_raw("args").map(|values| {
-            values
-                .map(|value| value.to_str().unwrap().to_owned())
-                .collect()
-        });
-
-        command.exec(command_args);
+        command.exec(Some(command_args));
     }
+}
+
+fn find_command<'a>(model: &'a Model, command_name: &str) -> &'a Box<dyn Command> {
+    model
+        .commands
+        .iter()
+        .find(|command| command.description().name == command_name)
+        .unwrap()
 }
 
 fn extract_cli_source_and_args() -> (String, Vec<String>, Option<String>) {
@@ -141,15 +149,43 @@ fn initial_cli() -> clap::Command {
 
 fn to_cli(model: &Model) -> clap::Command {
     model.commands.iter().fold(initial_cli(), |cli, command| {
-        cli.subcommand(
-            clap::Command::new(command.name().to_owned()).arg(
-                Arg::new("args")
+        let mut subcommand = clap::Command::new(command.description().name.to_owned());
+
+        if let Some(description) = &command.description().description {
+            subcommand = subcommand.about(description.to_owned());
+        }
+
+        subcommand = command
+            .description()
+            .args
+            .iter()
+            .fold(subcommand, |subcommand, argument| {
+                let arg: Arg = to_arg(argument);
+                subcommand.arg(arg)
+            });
+
+        if command.description().any_arg {
+            subcommand = subcommand.arg(
+                Arg::new(REMAINING_ARGS)
                     .allow_hyphen_values(true)
                     .num_args(0..=10)
                     .trailing_var_arg(true),
-            ),
-        )
+            );
+        }
+
+        cli.subcommand(subcommand)
     })
+}
+
+fn to_arg(argument: &Box<Argument>) -> Arg {
+    Arg::new(argument.name.to_owned())
+        .long(argument.name.to_owned())
+        .help(argument.description.to_owned())
+        .action(if argument.has_args {
+            ArgAction::Append
+        } else {
+            ArgAction::SetTrue
+        })
 }
 
 fn handle_completions(cli: &mut clap::Command, cli_name: String, shell_name: String) {
