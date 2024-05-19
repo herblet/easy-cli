@@ -2,9 +2,15 @@ use std::{io, process::exit, str::FromStr};
 
 use clap::{parser::ValuesRef, Arg};
 use clap_complete::{generate, Shell};
+use log::debug;
+
+use model::Command;
 use model::Model;
 
 mod model;
+mod utils;
+
+mod builder;
 
 const COMPLETIONS_ARG: &str = "completions";
 
@@ -15,11 +21,15 @@ const COMMAND_ARGS: &str = "command_args";
 const DEFAULT_CLI_NAME: &str = "cli";
 
 fn main() {
+    env_logger::init();
+
     let (cli_source, cli_args, shell_for_completions) = extract_cli_source_and_args();
 
     let model = Model::new(&cli_source);
 
     let mut cli = to_cli(&model);
+
+    debug!("args-{}", cli_args.join(" "));
 
     if shell_for_completions.is_some() {
         handle_completions(
@@ -38,13 +48,33 @@ fn main() {
             .find(|command| command.name() == script_to_call)
             .unwrap();
 
-        let command_args: Option<Vec<String>> = matches.get_raw("args").map(|values| {
-            values
-                .map(|value| value.to_str().unwrap().to_owned())
-                .collect()
-        });
+        debug!("args-{}", command.name());
 
-        command.exec(command_args);
+        let mut current = matches;
+
+        // recursively collect subcommand names into a vector while it is not None
+        let mut result = vec![];
+        loop {
+            match current.subcommand() {
+                None => break,
+                Some((sub_name, sub_matches)) => {
+                    result.push(sub_name.to_owned());
+                    current = sub_matches;
+                }
+            }
+        }
+
+        // Collect the args again, to pass to the script
+        current
+            .ids()
+            .filter_map(|id| current.get_raw(id.as_str()))
+            .for_each(|args| {
+                args.for_each(|arg| {
+                    result.push(arg.to_str().unwrap().to_owned());
+                });
+            });
+
+        command.exec(Some(result));
     }
 }
 
@@ -141,15 +171,45 @@ fn initial_cli() -> clap::Command {
 
 fn to_cli(model: &Model) -> clap::Command {
     model.commands.iter().fold(initial_cli(), |cli, command| {
-        cli.subcommand(
-            clap::Command::new(command.name().to_owned()).arg(
-                Arg::new("args")
-                    .allow_hyphen_values(true)
-                    .num_args(0..=10)
-                    .trailing_var_arg(true),
-            ),
-        )
+        cli.subcommand(command_to_cli(command))
     })
+}
+
+fn command_to_cli(command: &Box<dyn Command>) -> clap::Command {
+    let mut cli_command = clap::Command::new(command.name().to_owned()).about(
+        command
+            .description()
+            .map(|str| str.to_owned())
+            .unwrap_or(format!("Runs the {} script", command.name())),
+    );
+
+    for arg in command.args().iter() {
+        let mut cli_arg = Arg::new(arg.name.to_owned())
+            .help(arg.description.as_deref().unwrap_or("").to_string())
+            .required(!arg.optional);
+
+        if arg.var_arg {
+            cli_arg = cli_arg.trailing_var_arg(true);
+        }
+
+        cli_command = cli_command.arg(cli_arg);
+    }
+
+    // if command.sub_commands().is_empty() {
+    //     cli_command = cli_command.arg(
+    //         Arg::new("args")
+    //             .allow_hyphen_values(true)
+    //             .num_args(0..=10)
+    //             .trailing_var_arg(true),
+    //     );
+    // }
+
+    command
+        .sub_commands()
+        .iter()
+        .fold(cli_command, |parent, sub_command| {
+            parent.subcommand(command_to_cli(sub_command))
+        })
 }
 
 fn handle_completions(cli: &mut clap::Command, cli_name: String, shell_name: String) {
