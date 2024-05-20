@@ -336,9 +336,15 @@ fn default_name(path: &PathBuf) -> String {
 }
 
 pub fn build_script_command(path: PathBuf) -> Result<Option<ScriptCommand>, String> {
-    let file_content = &std::fs::read_to_string(&path).unwrap();
+    let mut file_content = std::fs::read_to_string(&path).unwrap();
 
-    let res = collect::<&str, nom::error::Error<&str>>(file_content)
+    // Until streaming is implemented properly and we can handle incomplete, make sure the file
+    // ends with a newline, otherwise we may miss the last tag
+    if !file_content.ends_with("\n") {
+        file_content.push('\n')
+    }
+
+    let res = collect::<&str, nom::error::Error<&str>>(&file_content)
         .map_err(|e| e.to_string())
         .map(|groups| {
             if groups.len() == 0 {
@@ -868,5 +874,26 @@ mod test {
         assert_eq!(arg.optional, true);
         assert_eq!(arg.var_arg, false);
         assert_eq!(arg.description, Some("The description of arg1".to_string()));
+    }
+
+    #[test]
+    fn build_script_command_finds_tag_on_last_line() {
+        let test_dir = tempfile::tempdir().unwrap();
+
+        let script1_path = test_dir.path().join("foo.sh");
+
+        File::create(&script1_path)
+            .unwrap()
+            .write(
+                indoc! {"\
+            # @about The description of this file"}
+                    .as_bytes(),
+            )
+            .expect(format!("Unable to create file {}", script1_path.to_str().unwrap()).as_str());
+
+        let command = build_script_command(script1_path).unwrap().unwrap();
+
+        assert_eq!(command.name, "foo");
+        assert_eq!(command.description.unwrap().as_str(), "The description of this file");
     }
 }
