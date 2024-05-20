@@ -195,14 +195,18 @@ fn command_to_cli(command: &Box<dyn Command>) -> clap::Command {
         cli_command = cli_command.arg(cli_arg);
     }
 
-    // if command.sub_commands().is_empty() {
-    //     cli_command = cli_command.arg(
-    //         Arg::new("args")
-    //             .allow_hyphen_values(true)
-    //             .num_args(0..=10)
-    //             .trailing_var_arg(true),
-    //     );
-    // }
+    for option in command.options().iter() {
+        let mut cli_option = Arg::new(option.name.to_owned())
+            .short(option.short)
+            .long(option.name.to_owned())
+            .help(option.description.as_deref().unwrap_or("").to_string());
+
+        if !option.has_param {
+            cli_option = cli_option.num_args(0);
+        }
+
+        cli_command = cli_command.arg(cli_option);
+    }
 
     command
         .sub_commands()
