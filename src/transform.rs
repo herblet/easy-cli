@@ -88,7 +88,7 @@ impl ToArg for CommandArg {
         }
 
         if self.var_arg {
-            cli_arg = cli_arg.trailing_var_arg(true);
+            cli_arg = cli_arg.trailing_var_arg(true).num_args(0..)
         } else {
             cli_arg = cli_arg.num_args(1);
         }
@@ -164,6 +164,13 @@ mod tests {
         let arg = CommandArg::new("TestArg", false, true, ArgType::Unknown, NO_DESCRIPTION);
 
         assert!(arg.to_arg().is_trailing_var_arg_set());
+    }
+
+    #[test]
+    fn var_arg_accepts_values() {
+        let arg = CommandArg::new("TestArg", false, true, ArgType::Unknown, NO_DESCRIPTION);
+
+        assert_eq!(arg.to_arg().get_num_args().unwrap(), (0..).into());
     }
 
     #[test]
