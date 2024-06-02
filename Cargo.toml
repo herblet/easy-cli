@@ -1,6 +1,6 @@
 [package]
 name = "easy-cli"
-version = "1.0.0"
+version = "1.0.1"
 authors = ["Toby Grasl <herblet@knowledge42.com>"]
 edition = "2021"
 description = "Builds CLI tools from a set of scripts."
@@ -9,7 +9,7 @@ license = "MIT"
 repository = "https://github.com/herblet/easy-cli"
 
 [dependencies]
-clap = { version = "4", features = [ "string" ] }
+clap = { version = "4", features = ["string"] }
 clap_complete = "4"
 lazy_static = "1.4"
 regex = "1.10"

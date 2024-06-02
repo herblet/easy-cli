@@ -1,21 +1,22 @@
 use std::ops::{Range, RangeFrom, RangeTo};
 use std::path::PathBuf;
 
+use nom::{
+    Compare, InputIter, InputLength, InputTakeAtPosition, IResult, Parser, sequence::preceded,
+    Slice,
+};
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
 use nom::bytes::streaming::is_not;
 use nom::character::complete::anychar;
 use nom::character::streaming::{multispace0, not_line_ending, space0};
 use nom::combinator::{flat_map, iterator, map, opt, rest, value};
+use nom::Err::{Error, Failure, Incomplete};
 use nom::error::ParseError;
 use nom::sequence::{delimited, pair, terminated, tuple};
-use nom::Err::{Error, Failure, Incomplete};
-use nom::{
-    sequence::preceded, Compare, IResult, InputIter, InputLength, InputTakeAtPosition, Parser,
-    Slice,
-};
 
-use crate::model::{Command, CommandArg, CommandOption, EmbeddedCommand, ScriptCommand};
+use crate::model::{ArgType, Command, CommandArg, CommandOption, EmbeddedCommand, ScriptCommand};
+use crate::model::ArgType::Unknown;
 use crate::utils::strip_file_suffix;
 
 const TRUE: &'static str = "true";
@@ -168,24 +169,34 @@ fn var_arg_tag<'a, T: InputType + 'a, E: ParseError<T> + 'a>(
     arg_var_arg(true, input)
 }
 
+fn arg_type<'a, E: ParseError<&'a str> + 'a>(input: &'a str) -> IResult<&'a str, ArgType, E> {
+    preceded(
+        nom::character::complete::space0,
+        delimited(
+            nom::character::complete::char('<'),
+            map(is_not(">"), ArgType::from),
+            nom::character::complete::char('>'),
+        ),
+    )(input)
+}
+
 fn arg_details<'a, E: ParseError<&'a str> + 'a>(
     name: &'a str,
     var_arg: bool,
     input: &'a str,
 ) -> IResult<&'a str, Option<DocTag>, E> {
     map(
-        preceded(
-            nom::character::complete::space0,
-            tuple((
-                padded_bool_default_false,
-                preceded(nom::character::complete::space0, rest),
-            )),
-        ),
-        |(optional, rest)| {
+        tuple((
+            opt(padded_bool),
+            opt(arg_type),
+            preceded(nom::character::complete::space0, rest),
+        )),
+        |(optional, arg_type, rest)| {
             Some(DocTag::Arg(CommandArg::new(
                 name.to_string(),
-                optional,
+                optional.unwrap_or(false),
                 var_arg,
+                arg_type.unwrap_or(Unknown),
                 none_if_empty(rest),
             )))
         },
@@ -441,10 +452,11 @@ mod test {
     use indoc::indoc;
 
     use crate::builder::{
-        arg_tag, build_script_command, collect, comment_or_not, doc_tag, doc_tag_or_not, opt_tag,
-        sub_tag, var_arg_tag, AboutTag, DocTag, SubTag,
+        AboutTag, arg_tag, build_script_command, collect, comment_or_not, doc_tag, doc_tag_or_not,
+        DocTag, opt_tag, sub_tag, SubTag, var_arg_tag,
     };
-    use crate::model::{Command, CommandArg, CommandOption};
+    use crate::model::{ArgType, Command, CommandArg, CommandOption};
+    use crate::model::test::NO_DESCRIPTION;
 
     #[test]
     fn sub_tag_finds_name() {
@@ -490,7 +502,13 @@ mod test {
 
         assert_eq!(
             sub.unwrap(),
-            DocTag::Arg(CommandArg::new("fooBar".to_string(), false, false, None))
+            DocTag::Arg(CommandArg::new(
+                "fooBar".to_string(),
+                false,
+                false,
+                ArgType::Unknown,
+                NO_DESCRIPTION
+            ))
         );
     }
 
@@ -510,7 +528,8 @@ mod test {
                 "fooBar".to_string(),
                 false,
                 false,
-                Some("A description of foobar".to_string())
+                ArgType::Unknown,
+                Some("A description of foobar".to_string()),
             ))
         );
     }
@@ -527,7 +546,13 @@ mod test {
 
         assert_eq!(
             sub.unwrap(),
-            DocTag::Arg(CommandArg::new("fooBar".to_string(), true, false, None))
+            DocTag::Arg(CommandArg::new(
+                "fooBar".to_string(),
+                true,
+                false,
+                ArgType::Unknown,
+                NO_DESCRIPTION
+            ))
         );
     }
 
@@ -547,7 +572,30 @@ mod test {
                 "fooBar".to_string(),
                 true,
                 false,
-                Some("A description of foobar".to_string())
+                ArgType::Unknown,
+                Some("A description of foobar".to_string()),
+            ))
+        );
+    }
+
+    #[test]
+    fn arg_finds_type() {
+        let input = indoc! {"
+            fooBar <file>
+            "};
+
+        let res = arg_tag::<&str, nom::error::Error<&str>>(input);
+
+        let (_, sub) = res.unwrap();
+
+        assert_eq!(
+            sub.unwrap(),
+            DocTag::Arg(CommandArg::new(
+                "fooBar".to_string(),
+                false,
+                false,
+                ArgType::File,
+                NO_DESCRIPTION
             ))
         );
     }
@@ -568,7 +616,30 @@ mod test {
                 "fooBar".to_string(),
                 true,
                 true,
-                Some("A description of foobar".to_string())
+                ArgType::Unknown,
+                Some("A description of foobar".to_string()),
+            ))
+        );
+    }
+
+    #[test]
+    fn arg_finds_optional_and_type_and_desc() {
+        let input = indoc! {"
+            fooBar true <file> An optional file
+            "};
+
+        let res = arg_tag::<&str, nom::error::Error<&str>>(input);
+
+        let (_, sub) = res.unwrap();
+
+        assert_eq!(
+            sub.unwrap(),
+            DocTag::Arg(CommandArg::new(
+                "fooBar".to_string(),
+                true,
+                false,
+                ArgType::File,
+                Some("An optional file".to_string())
             ))
         );
     }
@@ -672,7 +743,12 @@ mod test {
 
         assert_eq!(
             sub.unwrap(),
-            DocTag::Opt(CommandOption::new("fooBar".to_string(), None, false, None))
+            DocTag::Opt(CommandOption::new(
+                "fooBar".to_string(),
+                None,
+                false,
+                NO_DESCRIPTION
+            ))
         );
     }
 
@@ -692,7 +768,7 @@ mod test {
                 "fooBar".to_string(),
                 Some('f'),
                 false,
-                None
+                NO_DESCRIPTION,
             ))
         );
     }
@@ -709,7 +785,12 @@ mod test {
 
         assert_eq!(
             sub.unwrap(),
-            DocTag::Opt(CommandOption::new("fooBar".to_string(), None, true, None))
+            DocTag::Opt(CommandOption::new(
+                "fooBar".to_string(),
+                None,
+                true,
+                NO_DESCRIPTION
+            ))
         );
     }
 
@@ -729,7 +810,7 @@ mod test {
                 "fooBar".to_string(),
                 Some('d'),
                 true,
-                None
+                NO_DESCRIPTION,
             ))
         );
     }
@@ -750,7 +831,7 @@ mod test {
                 "fooBar".to_string(),
                 None,
                 false,
-                Some("This param".to_string())
+                Some("This param".to_string()),
             ))
         );
     }
@@ -771,7 +852,7 @@ mod test {
                 "fooBar".to_string(),
                 Some('e'),
                 true,
-                Some("This param".to_string())
+                Some("This param".to_string()),
             ))
         );
     }
@@ -792,7 +873,7 @@ mod test {
                 "fooBar".to_string(),
                 None,
                 false,
-                Some("A great option".to_string())
+                Some("A great option".to_string()),
             ))
         );
     }
@@ -886,14 +967,17 @@ mod test {
             .unwrap()
             .write(
                 indoc! {"\
-            # @about The description of this file"}
-                    .as_bytes(),
+                # @about The description of this file"}
+                .as_bytes(),
             )
             .expect(format!("Unable to create file {}", script1_path.to_str().unwrap()).as_str());
 
         let command = build_script_command(script1_path).unwrap().unwrap();
 
         assert_eq!(command.name, "foo");
-        assert_eq!(command.description.unwrap().as_str(), "The description of this file");
+        assert_eq!(
+            command.description.unwrap().as_str(),
+            "The description of this file"
+        );
     }
 }
