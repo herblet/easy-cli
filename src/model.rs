@@ -218,8 +218,6 @@ impl Command for ScriptCommand {
     fn exec(&self, args: Option<Vec<String>>) {
         let mut command = process::Command::new(self.path.to_str().unwrap());
 
-        command.arg(self.path.clone());
-
         args.iter().flat_map(|args| args.iter()).for_each(|arg| {
             command.arg(arg);
         });
