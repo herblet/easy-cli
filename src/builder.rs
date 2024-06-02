@@ -358,13 +358,21 @@ pub fn build_script_command(path: PathBuf) -> Result<Option<ScriptCommand>, Stri
     let res = collect::<&str, nom::error::Error<&str>>(&file_content)
         .map_err(|e| e.to_string())
         .map(|groups| {
-            if groups.len() == 0 {
+            if groups.len() == 0 || groups.len() == 1 && groups[0].len() == 0 {
+                // There are no doc-tags. Assume the file is a script
+                // and let it accept any args
                 Ok(Some(ScriptCommand::new(
                     default_name(&path),
                     None,
                     path,
                     vec![],
-                    vec![],
+                    vec![CommandArg::new(
+                        "args",
+                        true,
+                        true,
+                        ArgType::Unknown,
+                        Some("Any arguments are passed to the script"),
+                    )],
                     vec![],
                 )))
             } else if groups[0].len() > 0 && groups[0][0] == DocTag::Ignore {
