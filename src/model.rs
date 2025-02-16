@@ -40,6 +40,12 @@ impl<P: AsRef<Path>> From<P> for Model {
                     .filter_map(|entry| {
                         entry
                             .ok()
+                            .filter(|entry| {
+                                entry
+                                    .file_type()
+                                    .ok()
+                                    .map_or(false, |file_type| file_type.is_file())
+                            })
                             .map(|entry| {
                                 let path = entry.path();
                                 build_script_command(path)
@@ -346,6 +352,27 @@ pub(crate) mod test {
 
         assert_eq!(names.join(","), "script1,script2");
     }
+
+    #[test]
+    fn build_model_filters_directories_scripts() {
+        let test_dir = tempfile::tempdir().unwrap();
+
+        let script1_path = test_dir.path().join("script1.sh");
+
+        File::create(&script1_path)
+            .expect(format!("Unable to create file {}", script1_path.to_str().unwrap()).as_str());
+
+        let subdir_path = test_dir.path().join("subdir");
+        // Create a directory 'subdir'
+        std::fs::create_dir(&subdir_path)
+            .expect(format!("Unable to create directory {}", subdir_path.to_str().unwrap()).as_str());
+
+        let model = super::Model::from(test_dir.path());
+
+        assert_eq!(model.commands.len(), 1);
+        assert_eq!(model.commands[0].name(), "script1");
+    }
+
 
     #[test]
     fn build_model_includes_function_commands() {
