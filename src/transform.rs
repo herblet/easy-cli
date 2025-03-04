@@ -1,9 +1,9 @@
 //! Traits and implementations for transforming the internal model into a clap command
-use clap::{Arg, ArgAction, ValueHint};
 use clap::builder::StringValueParser;
+use clap::{Arg, ArgAction, ValueHint};
 
-use crate::model::{ArgType, CommandArg, CommandOption, Model};
 use crate::model::Command;
+use crate::model::{ArgType, CommandArg, CommandOption, Model};
 
 /// Convenience type alias to avoid confusion with internal Command
 type CliCommand = clap::Command;
@@ -118,8 +118,8 @@ impl ToArg for CommandOption {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{ArgType, EmbeddedCommand, ScriptCommand};
     use crate::model::test::NO_DESCRIPTION;
+    use crate::model::{ArgType, EmbeddedCommand, ScriptCommand};
 
     use super::*;
 

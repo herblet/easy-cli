@@ -1,9 +1,9 @@
+use std::fs::read_dir;
+use std::path::Path;
 use std::{
     path::PathBuf,
     process::{self, exit},
 };
-use std::fs::read_dir;
-use std::path::Path;
 
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -364,15 +364,19 @@ pub(crate) mod test {
 
         let subdir_path = test_dir.path().join("subdir");
         // Create a directory 'subdir'
-        std::fs::create_dir(&subdir_path)
-            .expect(format!("Unable to create directory {}", subdir_path.to_str().unwrap()).as_str());
+        std::fs::create_dir(&subdir_path).expect(
+            format!(
+                "Unable to create directory {}",
+                subdir_path.to_str().unwrap()
+            )
+            .as_str(),
+        );
 
         let model = super::Model::from(test_dir.path());
 
         assert_eq!(model.commands.len(), 1);
         assert_eq!(model.commands[0].name(), "script1");
     }
-
 
     #[test]
     fn build_model_includes_function_commands() {

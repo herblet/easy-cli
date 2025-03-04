@@ -1,22 +1,22 @@
 use std::ops::{Range, RangeFrom, RangeTo};
 use std::path::PathBuf;
 
-use nom::{
-    Compare, InputIter, InputLength, InputTakeAtPosition, IResult, Parser, sequence::preceded,
-    Slice,
-};
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
 use nom::bytes::streaming::is_not;
 use nom::character::complete::anychar;
 use nom::character::streaming::{multispace0, not_line_ending, space0};
 use nom::combinator::{flat_map, iterator, map, opt, rest, value};
-use nom::Err::{Error, Failure, Incomplete};
 use nom::error::ParseError;
 use nom::sequence::{delimited, pair, terminated, tuple};
+use nom::Err::{Error, Failure, Incomplete};
+use nom::{
+    sequence::preceded, Compare, IResult, InputIter, InputLength, InputTakeAtPosition, Parser,
+    Slice,
+};
 
-use crate::model::{ArgType, Command, CommandArg, CommandOption, EmbeddedCommand, ScriptCommand};
 use crate::model::ArgType::Unknown;
+use crate::model::{ArgType, Command, CommandArg, CommandOption, EmbeddedCommand, ScriptCommand};
 use crate::utils::strip_file_suffix;
 
 const TRUE: &'static str = "true";
@@ -460,11 +460,11 @@ mod test {
     use indoc::indoc;
 
     use crate::builder::{
-        AboutTag, arg_tag, build_script_command, collect, comment_or_not, doc_tag, doc_tag_or_not,
-        DocTag, opt_tag, sub_tag, SubTag, var_arg_tag,
+        arg_tag, build_script_command, collect, comment_or_not, doc_tag, doc_tag_or_not, opt_tag,
+        sub_tag, var_arg_tag, AboutTag, DocTag, SubTag,
     };
-    use crate::model::{ArgType, Command, CommandArg, CommandOption};
     use crate::model::test::NO_DESCRIPTION;
+    use crate::model::{ArgType, Command, CommandArg, CommandOption};
 
     #[test]
     fn sub_tag_finds_name() {
