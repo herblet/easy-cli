@@ -1,14 +1,16 @@
+use std::io::Write;
 use std::path::PathBuf;
 use std::{io, process::exit, str::FromStr};
 
-use clap::{parser::ValuesRef, Arg};
+use clap::error::Error;
+use clap::{parser::ValuesRef, Arg, ArgMatches};
 use clap_complete::{generate, Shell};
 use log::debug;
 
+use crate::model::Command;
+use crate::transform::ToCliCommand;
 use model::HasSubCommands;
 use model::Model;
-
-use crate::transform::ToCliCommand;
 
 mod model;
 mod utils;
@@ -20,7 +22,7 @@ const COMPLETIONS_ARG: &str = "completions";
 
 const CLI_SRC_ARG: &str = "SOURCE PATH";
 const CLI_NAME_ARG: &str = "name";
-const CLI_EMBEDDED_ARG: &str = "embedded";
+const CLI_EXECUTED_ARG: &str = "executed";
 
 const COMMAND_ARGS: &str = "command_args";
 
@@ -28,9 +30,8 @@ const DEFAULT_CLI_NAME: &str = "cli";
 
 enum Mode {
     Executed,
-    Embedded,
+    Evaluated,
     Completions(String),
-    EmbeddedCompletions(String),
 }
 fn main() {
     env_logger::init();
@@ -45,17 +46,44 @@ fn main() {
 
     match mode {
         Mode::Completions(shell) => handle_completions(cli, cli_args.iter().next().unwrap(), shell),
-        Mode::EmbeddedCompletions(shell) => {
-            handle_completions(cli, cli_args.iter().next().unwrap(), shell)
-        }
         Mode::Executed => execute_cli(model, cli, cli_args),
-        Mode::Embedded => embedded_commands(model, cli, cli_args),
+        Mode::Evaluated => write_embedded_script(model, cli, cli_args),
     }
 }
 
-fn embedded_commands(model: Model, cli: clap::Command, cli_args: Vec<String>) {
-    let arg_matches = cli.get_matches_from(cli_args.iter());
+fn build_embedded_script(model: Model, mut cli: clap::Command, cli_args: Vec<String>) -> Vec<u8> {
+    cli.try_get_matches_from_mut(cli_args.iter()).map_or_else(
+        |err| {
+            // Render the error. This is also where help and usage messages are rendered, since they are represented
+            // as errors in clap.
+            echo_error_script(err)
+        },
+        |matches| {
+            // render shell commands to execute the appropriate script, having setup the parameters
+            exec_commands_script(model, matches)
+        },
+    )
+}
 
+fn write_embedded_script(model: Model, cli: clap::Command, cli_args: Vec<String>) {
+    // In embedded mode, don't let clap print to stdout because stdout is to be evaled. So we need to capture
+    // version and help requests (which are returned here as errors)
+
+    let buffer = build_embedded_script(model, cli, cli_args);
+
+    // Write the produced content to stdout
+    io::stdout()
+        .write_all(&buffer)
+        .expect("Failed to write to stdout");
+}
+
+fn echo_error_script(err: Error) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    write!(&mut buffer, "echo \"{}\"", err.render().ansi()).expect("Failed to write to buffer");
+    buffer
+}
+
+fn exec_commands_script(model: Model, arg_matches: clap::ArgMatches) -> Vec<u8> {
     let (script_to_call, matches) = arg_matches.subcommand().unwrap();
 
     let command = model.get_command(script_to_call).unwrap();
@@ -73,34 +101,10 @@ fn embedded_commands(model: Model, cli: clap::Command, cli_args: Vec<String>) {
     // recursively collect subcommand names into a vector while it is not None
     let mut result = vec![];
     loop {
-        current.ids().for_each(|id| {
-            let name = id.as_str();
-
-            if let Some(option) = current_command.get_option(name) {
-                if option.has_param {
-                    todo!("Handle options with args")
-                } else {
-                    let opt_set = current.get_flag(name);
-
-                    opts.push((name, opt_set));
-                }
-            }
-
-            if let Some(_) = current_command.get_arg(name) {
-                let value_str = current
-                    .get_raw(name)
-                    .map(|value| {
-                        let strings = value
-                            .map(|v| v.to_str().unwrap().to_string())
-                            .collect::<Vec<String>>();
-                        strings.join(",")
-                    })
-                    .unwrap_or("".to_string());
-                args.push((name, value_str));
-            }
-        });
+        add_opts_and_args(current, current_command, &mut opts, &mut args);
         match current.subcommand() {
             None => break,
+
             Some((sub_name, sub_matches)) => {
                 result.push(sub_name.to_owned());
                 current = sub_matches;
@@ -113,45 +117,71 @@ fn embedded_commands(model: Model, cli: clap::Command, cli_args: Vec<String>) {
         }
     }
 
-    // echo "cli_args=(\"one\" \"two\" \"three\")"
-    // echo "typeset -A cli_opts"
-    // echo "cli_opts=(\"one\" 1 \"two\" 2 \"three\" 3)"
-    // echo "source \"/Users/toby/git_new/herblet/easy-cli/example/callee.sh\""
-    // echo "callee_one"
+    let mut buffer = Vec::new();
 
-    println!("typeset -A cli_args");
-    println!(
+    writeln!(&mut buffer, "#eval").expect("Failed to write to buffer");
+    writeln!(&mut buffer, "typeset -A cli_args").expect("Failed to write to buffer");
+    writeln!(
+        &mut buffer,
         "cli_args=({})",
         args.iter()
             .map(|arg| format!("\"{}\" \"{}\"", arg.0, arg.1))
             .collect::<Vec<String>>()
             .join(" ")
-    );
-    println!("typeset -A cli_opts");
-    println!(
+    )
+    .expect("Failed to write to buffer");
+    writeln!(&mut buffer, "typeset -A cli_opts").expect("Failed to write to buffer");
+    writeln!(
+        &mut buffer,
         "cli_opts=({})",
         opts.iter()
             .map(|opt| format!("\"{}\" {}", opt.0, opt.1))
             .collect::<Vec<String>>()
             .join(" ")
-    );
-    println!("source \"{}\"", path.to_str().unwrap());
+    )
+    .expect("Failed to write to buffer");
+    writeln!(&mut buffer, "source \"{}\"", path.to_str().unwrap())
+        .expect("Failed to write to buffer");
 
     if current_command.get_path() == None {
-        println!("{}", current_command.name());
+        writeln!(&mut buffer, "{}", current_command.name()).expect("Failed to write to buffer");
     }
 
-    // Collect the args again, to pass to the script
-    // current
-    //     .ids()
-    //     .filter_map(|id| current.get_raw(id.as_str()))
-    //     .for_each(|args| {
-    //         args.for_each(|arg| {
-    //             result.push(arg.to_str().unwrap().to_owned());
-    //         });
-    //     });
-    //
-    // command.exec(Some(result));
+    buffer
+}
+
+fn add_opts_and_args<'a>(
+    matches: &'a ArgMatches,
+    command: &'a Box<dyn Command>,
+    opts: &mut Vec<(&'a str, bool)>,
+    args: &mut Vec<(&'a str, String)>,
+) {
+    matches.ids().for_each(|id| {
+        let name = id.as_str();
+
+        if let Some(option) = command.get_option(name) {
+            if option.has_param {
+                todo!("Handle options with args")
+            } else {
+                let opt_set = matches.get_flag(name);
+
+                opts.push((name, opt_set));
+            }
+        }
+
+        if let Some(_) = command.get_arg(name) {
+            let value_str = matches
+                .get_raw(name)
+                .map(|value| {
+                    let strings = value
+                        .map(|v| v.to_str().unwrap().to_string())
+                        .collect::<Vec<String>>();
+                    strings.join(",")
+                })
+                .unwrap_or("".to_string());
+            args.push((name, value_str));
+        }
+    });
 }
 
 fn execute_cli(model: Model, cli: clap::Command, cli_args: Vec<String>) {
@@ -173,32 +203,8 @@ fn execute_cli(model: Model, cli: clap::Command, cli_args: Vec<String>) {
     // recursively collect subcommand names into a vector while it is not None
     let mut result = vec![];
     loop {
-        current.ids().for_each(|id| {
-            let name = id.as_str();
+        add_opts_and_args(current, current_command, &mut opts, &mut args);
 
-            if let Some(option) = current_command.get_option(name) {
-                if option.has_param {
-                    todo!("Handle options with args")
-                } else {
-                    let opt_set = current.get_flag(name);
-
-                    opts.push((name, opt_set));
-                }
-            }
-
-            if let Some(_) = current_command.get_arg(name) {
-                let value_str = current
-                    .get_raw(name)
-                    .map(|value| {
-                        let strings = value
-                            .map(|v| v.to_str().unwrap().to_string())
-                            .collect::<Vec<String>>();
-                        strings.join(",")
-                    })
-                    .unwrap_or("".to_string());
-                args.push((name, value_str));
-            }
-        });
         match current.subcommand() {
             None => break,
             Some((sub_name, sub_matches)) => {
@@ -246,8 +252,8 @@ fn extract_cli_source_and_args() -> (String, Vec<String>, Mode) {
         .map(String::clone)
         .unwrap_or(DEFAULT_CLI_NAME.to_owned());
 
-    let embedded: bool = launcher_matches
-        .get_one::<bool>(CLI_EMBEDDED_ARG)
+    let executed: bool = launcher_matches
+        .get_one::<bool>(CLI_EXECUTED_ARG)
         .map(|x| *x)
         .unwrap_or(false);
 
@@ -257,19 +263,13 @@ fn extract_cli_source_and_args() -> (String, Vec<String>, Mode) {
 
     let mode = match shell_for_completions {
         None => {
-            if embedded {
-                Mode::Embedded
-            } else {
+            if executed {
                 Mode::Executed
-            }
-        }
-        Some(shell) => {
-            if embedded {
-                Mode::EmbeddedCompletions(shell)
             } else {
-                Mode::Completions(shell)
+                Mode::Evaluated
             }
         }
+        Some(shell) => Mode::Completions(shell),
     };
 
     let command_args = launcher_matches
@@ -279,7 +279,7 @@ fn extract_cli_source_and_args() -> (String, Vec<String>, Mode) {
     (cli_source, build_cli_args(name, command_args), mode)
 }
 
-/// Builds the artificial command line ares for use with the cli-parser for the configured cli.
+/// Builds the artificial command line args for use with the cli-parser for the configured cli.
 fn build_cli_args(name: String, command_args: Option<ValuesRef<String>>) -> Vec<String> {
     // The full list of args for the cli contains the cli name...
     Box::new([name].into_iter())
@@ -306,11 +306,11 @@ fn launcher_cli() -> clap::Command {
                 .help("The name of the cli tool."),
         )
         .arg(
-            Arg::new(CLI_EMBEDDED_ARG)
-                .long(CLI_EMBEDDED_ARG)
+            Arg::new(CLI_EXECUTED_ARG)
+                .long(CLI_EXECUTED_ARG)
                 .short('e')
                 .num_args(0)
-                .help("Indicates that easy cli is embedded in a script."),
+                .help("Indicates that easy cli should execute the script and pass subcommand and args to it."),
         )
         .arg(
             Arg::new(CLI_SRC_ARG)
@@ -347,4 +347,53 @@ fn handle_completions(mut cli: clap::Command, cli_name: &str, shell_name: String
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use std::vec;
+
+    use crate::model::{ArgType, CommandArg, EmbeddedCommand, ScriptCommand};
+
+    use super::*;
+
+    #[test]
+    fn test_build_cli_args() {
+        let bar: EmbeddedCommand = EmbeddedCommand::new(
+            "bar".to_owned(),
+            Option::<String>::None,
+            vec![],
+            vec![CommandArg::new(
+                "arg1".to_owned(),
+                false,
+                false,
+                ArgType::Unknown,
+                Option::<String>::None,
+            )],
+        );
+
+        let foo = ScriptCommand::new(
+            "foo".to_owned(),
+            None,
+            PathBuf::from("/tmp/foo.sh"),
+            vec![],
+            vec![],
+            vec![Box::new(bar)],
+        );
+
+        let model = Model::new(vec![Box::new(foo)]);
+        let command = model.to_cli();
+
+        // capture the ouput produced by embedded_commands
+        let out = build_embedded_script(
+            model,
+            command,
+            vec![
+                "blah".to_owned(),
+                "foo".to_owned(),
+                "bar".to_owned(),
+                "arg1Val".to_owned(),
+            ],
+        );
+
+        let out_str = String::from_utf8(out).expect("Failed to convert to string");
+        assert_eq!(out_str, "#eval\ntypeset -A cli_args\ncli_args=(\"arg1\" \"arg1Val\")\ntypeset -A cli_opts\ncli_opts=()\nsource \"/tmp/foo.sh\"\nbar\n");
+    }
+}
