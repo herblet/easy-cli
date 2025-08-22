@@ -102,6 +102,7 @@ impl ToArg for CommandArg {
 impl ToArg for CommandOption {
     fn to_arg(&self) -> Arg {
         let mut cli_option = Arg::new(self.name.to_owned())
+            .global(true)
             .short(self.short)
             .long(self.name.to_owned())
             .help(self.description.as_deref().unwrap_or("").to_string());
