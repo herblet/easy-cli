@@ -2,7 +2,9 @@
 # easy-cli
 A tool for building personal and team CLI tools.
 
-easy-cli takes a CLI-Tool name option and a path to a directory of scripts as arguments. It assumes each script ist to be a CLI command, and builds an appropriate CLI parser.
+easy-cli takes a CLI-Tool name option and a path to a directory of scripts as arguments. It assumes each script ist to be a CLI command, which may also contain subcommands, and builds an appropriate CLI parser.
+
+See [Annotations](./ANNOTATIONS.md) for the annoations that the parserc considers.
 
 It could be used as an alias, but (in my experience, in zsh) this does not work with completion. You can define a function for your cli, for instance:
 

@@ -1,12 +1,14 @@
 use std::fs::read_dir;
+use std::path::Path;
 use std::{
     path::PathBuf,
     process::{self, exit},
 };
 
-use crate::builder::build_script_command;
 use lazy_static::lazy_static;
 use regex::Regex;
+
+use crate::builder::build_script_command;
 
 lazy_static! {
     pub static ref SUB_COMMAND: Regex =
@@ -19,29 +21,71 @@ pub struct Model {
     pub commands: Vec<Box<dyn Command>>,
 }
 
+pub trait HasSubCommands {
+    fn get_command(&self, name: &str) -> Option<&Box<dyn Command>>;
+}
+
 /// The model of a single CLI tool.
 impl Model {
-    // Creates a new CLI tool based on the scripts et al. in the given directory.
-    pub fn new(script_dir: &str) -> Model {
-        Model {
-            commands: read_dir(script_dir)
-                .map(|scripts| {
-                    scripts
-                        .filter_map(|entry| {
-                            entry
-                                .ok()
-                                .map(|entry| {
-                                    let path = entry.path();
-                                    build_script_command(path)
-                                        .ok()
-                                        .flatten()
-                                        .map(|command| Box::new(command) as Box<dyn Command>)
-                                })
-                                .flatten()
-                        })
-                        .collect()
-                })
-                .unwrap_or(Vec::new()),
+    pub fn new(commands: Vec<Box<dyn Command>>) -> Model {
+        Model { commands }
+    }
+}
+
+impl<P: AsRef<Path>> From<P> for Model {
+    fn from(path: P) -> Self {
+        let commands = read_dir(path)
+            .map(|scripts| {
+                scripts
+                    .filter_map(|entry| {
+                        entry
+                            .ok()
+                            .filter(|entry| {
+                                entry
+                                    .file_type()
+                                    .ok()
+                                    .map_or(false, |file_type| file_type.is_file())
+                            })
+                            .map(|entry| {
+                                let path = entry.path();
+                                build_script_command(path)
+                                    .ok()
+                                    .flatten()
+                                    .map(|command| Box::new(command) as Box<dyn Command>)
+                            })
+                            .flatten()
+                    })
+                    .collect()
+            })
+            .unwrap_or(Vec::new());
+        Model::new(commands)
+    }
+}
+
+impl HasSubCommands for Model {
+    fn get_command(&self, name: &str) -> Option<&Box<dyn Command>> {
+        self.commands.iter().find(|command| command.name() == name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArgType {
+    Unknown,
+    Path,
+    File,
+    Dir,
+}
+
+impl From<&str> for ArgType {
+    fn from(s: &str) -> ArgType {
+        if s.eq_ignore_ascii_case("path") {
+            ArgType::Path
+        } else if s.eq_ignore_ascii_case("file") {
+            ArgType::File
+        } else if s.eq_ignore_ascii_case("dir") {
+            ArgType::Dir
+        } else {
+            ArgType::Unknown
         }
     }
 }
@@ -51,16 +95,28 @@ pub struct CommandArg {
     pub name: String,
     pub optional: bool,
     pub var_arg: bool,
+    pub arg_type: ArgType,
     pub description: Option<String>,
 }
 
 impl CommandArg {
-    pub fn new(name: String, optional: bool, var_arg: bool, description: Option<String>) -> Self {
+    pub fn new<S, T>(
+        name: S,
+        optional: bool,
+        var_arg: bool,
+        arg_type: ArgType,
+        description: Option<T>,
+    ) -> Self
+    where
+        S: Into<String>,
+        T: Into<String>,
+    {
         CommandArg {
-            name,
+            name: name.into(),
             optional,
             var_arg,
-            description,
+            arg_type,
+            description: description.map(Into::into),
         }
     }
 }
@@ -74,22 +130,21 @@ pub struct CommandOption {
 }
 
 impl CommandOption {
-    pub fn new(
-        name: String,
-        short: Option<char>,
-        has_param: bool,
-        description: Option<String>,
-    ) -> Self {
+    pub fn new<S, T>(name: S, short: Option<char>, has_param: bool, description: Option<T>) -> Self
+    where
+        S: Into<String>,
+        T: Into<String>,
+    {
         CommandOption {
-            name,
+            name: name.into(),
             short,
             has_param,
-            description,
+            description: description.map(Into::into),
         }
     }
 }
 
-pub trait Command {
+pub(crate) trait Command {
     fn name(&self) -> &str;
 
     fn description(&self) -> Option<&str> {
@@ -100,12 +155,24 @@ pub trait Command {
 
     fn sub_commands(&self) -> &Vec<Box<dyn Command>>;
 
+    fn has_sub_commands(&self) -> bool;
+
     fn options(&self) -> &Vec<CommandOption>;
 
     fn args(&self) -> &Vec<CommandArg>;
+
+    fn get_option(&self, name: &str) -> Option<&CommandOption> {
+        self.options().iter().find(|option| option.name == name)
+    }
+
+    fn get_arg(&self, name: &str) -> Option<&CommandArg> {
+        self.args().iter().find(|arg| arg.name == name)
+    }
+    fn get_path(&self) -> Option<&PathBuf>;
 }
 
-/// A single CLI command.
+/// A command that is located in a script file. The command may have sub-commands that are functions
+/// in the script file.
 pub struct ScriptCommand {
     pub name: String,
     pub description: Option<String>,
@@ -135,6 +202,19 @@ impl ScriptCommand {
     }
 }
 
+impl<T> HasSubCommands for T
+where
+    T: AsRef<dyn Command>,
+{
+    fn get_command(&self, name: &str) -> Option<&Box<dyn Command>> {
+        let command: &dyn Command = self.as_ref();
+        command
+            .sub_commands()
+            .iter()
+            .find(|command| command.name() == name)
+    }
+}
+
 impl Command for ScriptCommand {
     fn name(&self) -> &str {
         self.name.as_str()
@@ -145,9 +225,7 @@ impl Command for ScriptCommand {
     }
 
     fn exec(&self, args: Option<Vec<String>>) {
-        let mut command = process::Command::new("zsh");
-
-        command.arg(self.path.clone());
+        let mut command = process::Command::new(self.path.to_str().unwrap());
 
         args.iter().flat_map(|args| args.iter()).for_each(|arg| {
             command.arg(arg);
@@ -172,6 +250,9 @@ impl Command for ScriptCommand {
         &self.sub_commands
     }
 
+    fn has_sub_commands(&self) -> bool {
+        !self.sub_commands.is_empty()
+    }
     fn options(&self) -> &Vec<CommandOption> {
         &self.options
     }
@@ -179,26 +260,33 @@ impl Command for ScriptCommand {
     fn args(&self) -> &Vec<CommandArg> {
         &self.args
     }
+    fn get_path(&self) -> Option<&PathBuf> {
+        Some(&self.path)
+    }
 }
 
 pub struct EmbeddedCommand {
     name: String,
-    descripton: Option<String>,
+    description: Option<String>,
     options: Vec<CommandOption>,
     args: Vec<CommandArg>,
     sub_commands: Vec<Box<dyn Command>>,
 }
 
 impl EmbeddedCommand {
-    pub fn new(
-        name: String,
-        descripton: Option<String>,
+    pub fn new<S, T>(
+        name: S,
+        description: Option<T>,
         options: Vec<CommandOption>,
         args: Vec<CommandArg>,
-    ) -> EmbeddedCommand {
+    ) -> EmbeddedCommand
+    where
+        S: Into<String>,
+        T: Into<String>,
+    {
         EmbeddedCommand {
-            name,
-            descripton,
+            name: name.into(),
+            description: description.map(Into::into),
             options,
             args,
             sub_commands: vec![],
@@ -212,7 +300,7 @@ impl Command for EmbeddedCommand {
     }
 
     fn description(&self) -> Option<&str> {
-        self.descripton.as_deref()
+        self.description.as_deref()
     }
     fn exec(&self, _args: Option<Vec<String>>) {
         // The handling of sub-command execution is currently handled by the script
@@ -223,6 +311,10 @@ impl Command for EmbeddedCommand {
         self.sub_commands.as_ref()
     }
 
+    fn has_sub_commands(&self) -> bool {
+        !self.sub_commands.is_empty()
+    }
+
     fn options(&self) -> &Vec<CommandOption> {
         &self.options
     }
@@ -230,12 +322,18 @@ impl Command for EmbeddedCommand {
     fn args(&self) -> &Vec<CommandArg> {
         &self.args
     }
+
+    fn get_path(&self) -> Option<&PathBuf> {
+        None
+    }
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use std::fs::File;
     use std::io::Write;
+
+    pub const NO_DESCRIPTION: Option<String> = None;
 
     #[test]
     fn build_model_lists_scripts() {
@@ -250,7 +348,7 @@ mod test {
         File::create(&script2_path)
             .expect(format!("Unable to create file {}", script2_path.to_str().unwrap()).as_str());
 
-        let model = super::Model::new(test_dir.path().to_str().unwrap());
+        let model = super::Model::from(test_dir.path());
 
         assert_eq!(model.commands.len(), 2);
 
@@ -266,6 +364,31 @@ mod test {
     }
 
     #[test]
+    fn build_model_filters_directories_scripts() {
+        let test_dir = tempfile::tempdir().unwrap();
+
+        let script1_path = test_dir.path().join("script1.sh");
+
+        File::create(&script1_path)
+            .expect(format!("Unable to create file {}", script1_path.to_str().unwrap()).as_str());
+
+        let subdir_path = test_dir.path().join("subdir");
+        // Create a directory 'subdir'
+        std::fs::create_dir(&subdir_path).expect(
+            format!(
+                "Unable to create directory {}",
+                subdir_path.to_str().unwrap()
+            )
+            .as_str(),
+        );
+
+        let model = super::Model::from(test_dir.path());
+
+        assert_eq!(model.commands.len(), 1);
+        assert_eq!(model.commands[0].name(), "script1");
+    }
+
+    #[test]
     fn build_model_includes_function_commands() {
         let test_dir = tempfile::tempdir().unwrap();
 
@@ -276,7 +399,7 @@ mod test {
             .write("# @sub sub1\nfunction sub1(){}\n# @sub sub2\nfunction sub2(){}\n".as_bytes())
             .expect(format!("Unable to create file {}", script1_path.to_str().unwrap()).as_str());
 
-        let model = super::Model::new(test_dir.path().to_str().unwrap());
+        let model = super::Model::from(test_dir.path());
 
         assert_eq!(model.commands.len(), 1);
         assert_eq!(model.commands[0].sub_commands().len(), 2);
@@ -312,7 +435,7 @@ mod test {
             .write("# @ignore-at-root\n".as_bytes())
             .expect(format!("Unable to write file {}", script2_path.to_str().unwrap()).as_str());
 
-        let model = super::Model::new(test_dir.path().to_str().unwrap());
+        let model = super::Model::from(test_dir.path());
 
         assert_eq!(model.commands.len(), 1);
         assert_eq!(model.commands[0].sub_commands().len(), 2);
@@ -326,5 +449,19 @@ mod test {
         names.sort();
 
         assert_eq!(names.join(","), "sub1,sub2");
+    }
+
+    #[test]
+    fn arg_type_from_str() {
+        assert_eq!(super::ArgType::from("path"), super::ArgType::Path);
+        assert_eq!(super::ArgType::from("file"), super::ArgType::File);
+        assert_eq!(super::ArgType::from("dir"), super::ArgType::Dir);
+
+        // It is case-insensitive
+        assert_eq!(super::ArgType::from("Path"), super::ArgType::Path);
+
+        // Any other value is unknown
+        assert_eq!(super::ArgType::from("foo"), super::ArgType::Unknown);
+        assert_eq!(super::ArgType::from("bar"), super::ArgType::Unknown);
     }
 }

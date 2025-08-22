@@ -1,84 +1,233 @@
+use std::io::Write;
+use std::path::PathBuf;
 use std::{io, process::exit, str::FromStr};
 
-use clap::{parser::ValuesRef, Arg};
+use clap::error::Error;
+use clap::{parser::ValuesRef, Arg, ArgMatches};
 use clap_complete::{generate, Shell};
 use log::debug;
 
-use model::Command;
+use crate::model::Command;
+use crate::transform::ToCliCommand;
+use model::HasSubCommands;
 use model::Model;
 
 mod model;
 mod utils;
 
 mod builder;
+mod transform;
 
 const COMPLETIONS_ARG: &str = "completions";
 
 const CLI_SRC_ARG: &str = "SOURCE PATH";
 const CLI_NAME_ARG: &str = "name";
+const CLI_EXECUTED_ARG: &str = "executed";
+
 const COMMAND_ARGS: &str = "command_args";
 
 const DEFAULT_CLI_NAME: &str = "cli";
 
+enum Mode {
+    Executed,
+    Evaluated,
+    Completions(String),
+}
 fn main() {
     env_logger::init();
 
-    let (cli_source, cli_args, shell_for_completions) = extract_cli_source_and_args();
+    let (cli_source, cli_args, mode) = extract_cli_source_and_args();
 
-    let model = Model::new(&cli_source);
+    let model = Model::from(&cli_source);
 
-    let mut cli = to_cli(&model);
+    let cli: clap::Command = model.to_cli();
 
     debug!("args-{}", cli_args.join(" "));
 
-    if shell_for_completions.is_some() {
-        handle_completions(
-            &mut cli,
-            cli_args.into_iter().next().unwrap(),
-            shell_for_completions.unwrap(),
-        );
-    } else {
-        let arg_matches = cli.get_matches_from(cli_args.iter());
-
-        let (script_to_call, matches) = arg_matches.subcommand().unwrap();
-
-        let command = model
-            .commands
-            .iter()
-            .find(|command| command.name() == script_to_call)
-            .unwrap();
-
-        debug!("args-{}", command.name());
-
-        let mut current = matches;
-
-        // recursively collect subcommand names into a vector while it is not None
-        let mut result = vec![];
-        loop {
-            match current.subcommand() {
-                None => break,
-                Some((sub_name, sub_matches)) => {
-                    result.push(sub_name.to_owned());
-                    current = sub_matches;
-                }
-            }
-        }
-
-        // Collect the args again, to pass to the script
-        current
-            .ids()
-            .filter_map(|id| current.get_raw(id.as_str()))
-            .for_each(|args| {
-                args.for_each(|arg| {
-                    result.push(arg.to_str().unwrap().to_owned());
-                });
-            });
-
-        command.exec(Some(result));
+    match mode {
+        Mode::Completions(shell) => handle_completions(cli, cli_args.iter().next().unwrap(), shell),
+        Mode::Executed => execute_cli(model, cli, cli_args),
+        Mode::Evaluated => write_embedded_script(model, cli, cli_args),
     }
 }
 
-fn extract_cli_source_and_args() -> (String, Vec<String>, Option<String>) {
+fn build_embedded_script(model: Model, mut cli: clap::Command, cli_args: Vec<String>) -> Vec<u8> {
+    cli.try_get_matches_from_mut(cli_args.iter()).map_or_else(
+        |err| {
+            // Render the error. This is also where help and usage messages are rendered, since they are represented
+            // as errors in clap.
+            echo_error_script(err)
+        },
+        |matches| {
+            // render shell commands to execute the appropriate script, having setup the parameters
+            exec_commands_script(model, matches)
+        },
+    )
+}
+
+fn write_embedded_script(model: Model, cli: clap::Command, cli_args: Vec<String>) {
+    // In embedded mode, don't let clap print to stdout because stdout is to be evaled. So we need to capture
+    // version and help requests (which are returned here as errors)
+
+    let buffer = build_embedded_script(model, cli, cli_args);
+
+    // Write the produced content to stdout
+    io::stdout()
+        .write_all(&buffer)
+        .expect("Failed to write to stdout");
+}
+
+fn echo_error_script(err: Error) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    write!(&mut buffer, "echo \"{}\"", err.render().ansi()).expect("Failed to write to buffer");
+    buffer
+}
+
+fn exec_commands_script(model: Model, arg_matches: clap::ArgMatches) -> Vec<u8> {
+    let (script_to_call, matches) = arg_matches.subcommand().unwrap();
+
+    let command = model.get_command(script_to_call).unwrap();
+
+    let mut current_command = command;
+    let mut path: &PathBuf = current_command.get_path().unwrap();
+
+    debug!("args-{}", command.name());
+
+    let mut current = matches;
+
+    let mut opts = Vec::<(&str, bool)>::new();
+    let mut args = Vec::<(&str, String)>::new();
+
+    // recursively collect subcommand names into a vector while it is not None
+    let mut result = vec![];
+    loop {
+        add_opts_and_args(current, current_command, &mut opts, &mut args);
+        match current.subcommand() {
+            None => break,
+
+            Some((sub_name, sub_matches)) => {
+                result.push(sub_name.to_owned());
+                current = sub_matches;
+                current_command = current_command.get_command(sub_name).unwrap();
+
+                if let Some(new_path) = current_command.get_path() {
+                    path = new_path
+                }
+            }
+        }
+    }
+
+    let mut buffer = Vec::new();
+
+    writeln!(&mut buffer, "#eval").expect("Failed to write to buffer");
+    writeln!(&mut buffer, "typeset -A cli_args").expect("Failed to write to buffer");
+    writeln!(
+        &mut buffer,
+        "cli_args=({})",
+        args.iter()
+            .map(|arg| format!("\"{}\" \"{}\"", arg.0, arg.1))
+            .collect::<Vec<String>>()
+            .join(" ")
+    )
+    .expect("Failed to write to buffer");
+    writeln!(&mut buffer, "typeset -A cli_opts").expect("Failed to write to buffer");
+    writeln!(
+        &mut buffer,
+        "cli_opts=({})",
+        opts.iter()
+            .map(|opt| format!("\"{}\" {}", opt.0, opt.1))
+            .collect::<Vec<String>>()
+            .join(" ")
+    )
+    .expect("Failed to write to buffer");
+    writeln!(&mut buffer, "source \"{}\"", path.to_str().unwrap())
+        .expect("Failed to write to buffer");
+
+    if current_command.get_path() == None {
+        writeln!(&mut buffer, "{}", current_command.name()).expect("Failed to write to buffer");
+    }
+
+    buffer
+}
+
+fn add_opts_and_args<'a>(
+    matches: &'a ArgMatches,
+    command: &'a Box<dyn Command>,
+    opts: &mut Vec<(&'a str, bool)>,
+    args: &mut Vec<(&'a str, String)>,
+) {
+    matches.ids().for_each(|id| {
+        let name = id.as_str();
+
+        if let Some(option) = command.get_option(name) {
+            if option.has_param {
+                todo!("Handle options with args")
+            } else {
+                let opt_set = matches.get_flag(name);
+
+                opts.push((name, opt_set));
+            }
+        }
+
+        if let Some(_) = command.get_arg(name) {
+            let value_str = matches
+                .get_raw(name)
+                .map(|value| {
+                    let strings = value
+                        .map(|v| v.to_str().unwrap().to_string())
+                        .collect::<Vec<String>>();
+                    strings.join(",")
+                })
+                .unwrap_or("".to_string());
+            args.push((name, value_str));
+        }
+    });
+}
+
+fn execute_cli(model: Model, cli: clap::Command, cli_args: Vec<String>) {
+    let arg_matches = cli.get_matches_from(cli_args.iter());
+
+    let (script_to_call, matches) = arg_matches.subcommand().unwrap();
+
+    let command = model.get_command(script_to_call).unwrap();
+
+    let current_command = command;
+
+    debug!("args-{}", command.name());
+
+    let mut current = matches;
+
+    let mut opts = Vec::<(&str, bool)>::new();
+    let mut args = Vec::<(&str, String)>::new();
+
+    // recursively collect subcommand names into a vector while it is not None
+    let mut result = vec![];
+    loop {
+        add_opts_and_args(current, current_command, &mut opts, &mut args);
+
+        match current.subcommand() {
+            None => break,
+            Some((sub_name, sub_matches)) => {
+                result.push(sub_name.to_owned());
+                current = sub_matches;
+            }
+        }
+    }
+
+    // Collect the args again, to pass to the script
+    current
+        .ids()
+        .filter_map(|id| current.get_raw(id.as_str()))
+        .for_each(|args| {
+            args.for_each(|arg| {
+                result.push(arg.to_str().unwrap().to_owned());
+            });
+        });
+
+    command.exec(Some(result));
+}
+
+fn extract_cli_source_and_args() -> (String, Vec<String>, Mode) {
     // Create an argument-parser for easy-cli itself.
     let mut launcher_cli = launcher_cli();
 
@@ -103,22 +252,34 @@ fn extract_cli_source_and_args() -> (String, Vec<String>, Option<String>) {
         .map(String::clone)
         .unwrap_or(DEFAULT_CLI_NAME.to_owned());
 
+    let executed: bool = launcher_matches
+        .get_one::<bool>(CLI_EXECUTED_ARG)
+        .map(|x| *x)
+        .unwrap_or(false);
+
     let shell_for_completions: Option<String> = launcher_matches
         .get_one::<String>(COMPLETIONS_ARG)
         .map(String::clone);
+
+    let mode = match shell_for_completions {
+        None => {
+            if executed {
+                Mode::Executed
+            } else {
+                Mode::Evaluated
+            }
+        }
+        Some(shell) => Mode::Completions(shell),
+    };
 
     let command_args = launcher_matches
         .get_many::<String>(COMMAND_ARGS)
         .map(|args| args.clone());
 
-    (
-        cli_source,
-        build_cli_args(name, command_args),
-        shell_for_completions,
-    )
+    (cli_source, build_cli_args(name, command_args), mode)
 }
 
-/// Builds the artificial command line ares for use with the cli-parser for the configured cli.
+/// Builds the artificial command line args for use with the cli-parser for the configured cli.
 fn build_cli_args(name: String, command_args: Option<ValuesRef<String>>) -> Vec<String> {
     // The full list of args for the cli contains the cli name...
     Box::new([name].into_iter())
@@ -145,6 +306,13 @@ fn launcher_cli() -> clap::Command {
                 .help("The name of the cli tool."),
         )
         .arg(
+            Arg::new(CLI_EXECUTED_ARG)
+                .long(CLI_EXECUTED_ARG)
+                .short('e')
+                .num_args(0)
+                .help("Indicates that easy cli should execute the script and pass subcommand and args to it."),
+        )
+        .arg(
             Arg::new(CLI_SRC_ARG)
                 .help("The directory containing the scripts to be called")
                 .required(true),
@@ -163,63 +331,12 @@ fn launcher_cli() -> clap::Command {
         )
 }
 
-fn initial_cli() -> clap::Command {
-    clap::Command::new("easy-cli")
-        .version("0.1.0")
-        .subcommand_required(true)
-}
+fn handle_completions(mut cli: clap::Command, cli_name: &str, shell_name: String) {
+    let cli_name = cli_name;
 
-fn to_cli(model: &Model) -> clap::Command {
-    model.commands.iter().fold(initial_cli(), |cli, command| {
-        cli.subcommand(command_to_cli(command))
-    })
-}
-
-fn command_to_cli(command: &Box<dyn Command>) -> clap::Command {
-    let mut cli_command = clap::Command::new(command.name().to_owned()).about(
-        command
-            .description()
-            .map(|str| str.to_owned())
-            .unwrap_or(format!("Runs the {} script", command.name())),
-    );
-
-    for arg in command.args().iter() {
-        let mut cli_arg = Arg::new(arg.name.to_owned())
-            .help(arg.description.as_deref().unwrap_or("").to_string())
-            .required(!arg.optional);
-
-        if arg.var_arg {
-            cli_arg = cli_arg.trailing_var_arg(true);
-        }
-
-        cli_command = cli_command.arg(cli_arg);
-    }
-
-    for option in command.options().iter() {
-        let mut cli_option = Arg::new(option.name.to_owned())
-            .short(option.short)
-            .long(option.name.to_owned())
-            .help(option.description.as_deref().unwrap_or("").to_string());
-
-        if !option.has_param {
-            cli_option = cli_option.num_args(0);
-        }
-
-        cli_command = cli_command.arg(cli_option);
-    }
-
-    command
-        .sub_commands()
-        .iter()
-        .fold(cli_command, |parent, sub_command| {
-            parent.subcommand(command_to_cli(sub_command))
-        })
-}
-
-fn handle_completions(cli: &mut clap::Command, cli_name: String, shell_name: String) {
     match Shell::from_str(shell_name.as_str()) {
         Ok(shell) => {
-            generate(shell, cli, cli_name, &mut io::stdout());
+            generate(shell, &mut cli, cli_name, &mut io::stdout());
             exit(0);
         }
         Err(e) => {
@@ -227,4 +344,56 @@ fn handle_completions(cli: &mut clap::Command, cli_name: String, shell_name: Str
             exit(1);
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use std::vec;
+
+    use crate::model::{ArgType, CommandArg, EmbeddedCommand, ScriptCommand};
+
+    use super::*;
+
+    #[test]
+    fn test_build_cli_args() {
+        let bar: EmbeddedCommand = EmbeddedCommand::new(
+            "bar".to_owned(),
+            Option::<String>::None,
+            vec![],
+            vec![CommandArg::new(
+                "arg1".to_owned(),
+                false,
+                false,
+                ArgType::Unknown,
+                Option::<String>::None,
+            )],
+        );
+
+        let foo = ScriptCommand::new(
+            "foo".to_owned(),
+            None,
+            PathBuf::from("/tmp/foo.sh"),
+            vec![],
+            vec![],
+            vec![Box::new(bar)],
+        );
+
+        let model = Model::new(vec![Box::new(foo)]);
+        let command = model.to_cli();
+
+        // capture the ouput produced by embedded_commands
+        let out = build_embedded_script(
+            model,
+            command,
+            vec![
+                "blah".to_owned(),
+                "foo".to_owned(),
+                "bar".to_owned(),
+                "arg1Val".to_owned(),
+            ],
+        );
+
+        let out_str = String::from_utf8(out).expect("Failed to convert to string");
+        assert_eq!(out_str, "#eval\ntypeset -A cli_args\ncli_args=(\"arg1\" \"arg1Val\")\ntypeset -A cli_opts\ncli_opts=()\nsource \"/tmp/foo.sh\"\nbar\n");
+    }
 }
