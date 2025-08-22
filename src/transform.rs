@@ -36,14 +36,16 @@ impl<C: ?Sized + Command> ToCliCommand for C {
                 .unwrap_or(format!("Runs the {} script", self.name())),
         );
 
+        let make_opts_global = self.has_sub_commands();
+
         // Add the Options first
         cli_command = self
             .options()
             .iter()
-            .map(ToArg::to_arg)
+            .map(|option| option.to_arg(make_opts_global))
             .chain(
-                // Then add the Arguments
-                self.args().iter().map(ToArg::to_arg),
+                // Then add the Arguments; never global (in fact, a command with subcommands should not have args)
+                self.args().iter().map(|arg| arg.to_arg(false)),
             )
             .fold(cli_command, CliCommand::arg);
 
@@ -59,7 +61,7 @@ impl<C: ?Sized + Command> ToCliCommand for C {
 
 /// Converts an implementor to a clap Arg
 trait ToArg {
-    fn to_arg(&self) -> Arg;
+    fn to_arg(&self, global: bool) -> Arg;
 }
 
 trait ToValueHint {
@@ -78,7 +80,7 @@ impl ToValueHint for ArgType {
 }
 
 impl ToArg for CommandArg {
-    fn to_arg(&self) -> Arg {
+    fn to_arg(&self, _: bool) -> Arg {
         let mut cli_arg = Arg::new(self.name.to_owned())
             .value_parser(StringValueParser::default())
             .required(!self.optional);
@@ -100,9 +102,9 @@ impl ToArg for CommandArg {
 }
 
 impl ToArg for CommandOption {
-    fn to_arg(&self) -> Arg {
+    fn to_arg(&self, global: bool) -> Arg {
         let mut cli_option = Arg::new(self.name.to_owned())
-            .global(true)
+            .global(global)
             .short(self.short)
             .long(self.name.to_owned())
             .help(self.description.as_deref().unwrap_or("").to_string());
@@ -136,49 +138,49 @@ mod tests {
     fn arg_transfers_name() {
         let arg = CommandArg::new("TestArg", false, false, ArgType::Unknown, NO_DESCRIPTION);
 
-        assert_eq!(arg.to_arg().get_id().as_str(), "TestArg");
+        assert_eq!(arg.to_arg(false).get_id().as_str(), "TestArg");
     }
 
     #[test]
     fn non_opt_arg_is_required() {
         let arg = CommandArg::new("TestArg", false, false, ArgType::Unknown, NO_DESCRIPTION);
 
-        assert!(arg.to_arg().is_required_set());
+        assert!(arg.to_arg(false).is_required_set());
     }
 
     #[test]
     fn opt_arg_not_required() {
         let arg = CommandArg::new("TestArg", true, false, ArgType::Unknown, NO_DESCRIPTION);
 
-        assert!(!arg.to_arg().is_required_set());
+        assert!(!arg.to_arg(false).is_required_set());
     }
 
     #[test]
     fn non_var_arg_transfers() {
         let arg = CommandArg::new("TestArg", false, false, ArgType::Unknown, NO_DESCRIPTION);
 
-        assert!(!arg.to_arg().is_trailing_var_arg_set());
+        assert!(!arg.to_arg(false).is_trailing_var_arg_set());
     }
 
     #[test]
     fn var_arg_transfers() {
         let arg = CommandArg::new("TestArg", false, true, ArgType::Unknown, NO_DESCRIPTION);
 
-        assert!(arg.to_arg().is_trailing_var_arg_set());
+        assert!(arg.to_arg(false).is_trailing_var_arg_set());
     }
 
     #[test]
     fn var_arg_accepts_values() {
         let arg = CommandArg::new("TestArg", false, true, ArgType::Unknown, NO_DESCRIPTION);
 
-        assert_eq!(arg.to_arg().get_num_args().unwrap(), (0..).into());
+        assert_eq!(arg.to_arg(false).get_num_args().unwrap(), (0..).into());
     }
 
     #[test]
     fn no_desription_no_help() {
         let arg = CommandArg::new("TestArg", false, true, ArgType::Unknown, NO_DESCRIPTION);
 
-        assert!(arg.to_arg().get_help().is_none());
+        assert!(arg.to_arg(false).get_help().is_none());
     }
 
     #[test]
@@ -192,7 +194,7 @@ mod tests {
         );
 
         assert_eq!(
-            arg.to_arg().get_help().unwrap().to_string().as_str(),
+            arg.to_arg(false).get_help().unwrap().to_string().as_str(),
             "My description"
         );
     }
@@ -201,7 +203,7 @@ mod tests {
     fn type_is_value_hint() {
         let arg = CommandArg::new("TestArg", false, true, ArgType::Dir, Some("My description"));
 
-        assert_eq!(arg.to_arg().get_value_hint(), ValueHint::DirPath);
+        assert_eq!(arg.to_arg(false).get_value_hint(), ValueHint::DirPath);
     }
 
     #[test]
@@ -231,6 +233,34 @@ mod tests {
         assert_eq!(1, cli_command.get_subcommands().count());
     }
 
+    fn script_command(
+        opts: Vec<CommandOption>,
+        args: Vec<CommandArg>,
+        sub: Vec<Box<dyn Command>>,
+    ) -> ScriptCommand {
+        ScriptCommand::new(
+            "test".to_string(),
+            Some("echo test".to_string()),
+            "Test command".into(),
+            opts,
+            args,
+            sub,
+        )
+    }
+
+    fn embedded_command(
+        idx: u32,
+        opts: Vec<CommandOption>,
+        args: Vec<CommandArg>,
+    ) -> EmbeddedCommand {
+        EmbeddedCommand::new(
+            format!("sub{}", idx),
+            Some(format!("embedded sub{}", idx)),
+            opts,
+            args,
+        )
+    }
+
     fn arg(name: &str) -> CommandArg {
         CommandArg::new(name, false, false, ArgType::Unknown, NO_DESCRIPTION)
     }
@@ -245,14 +275,7 @@ mod tests {
     }
     #[test]
     fn to_cli_adds_args() {
-        let command = ScriptCommand::new(
-            "test".to_string(),
-            Some("echo test".to_string()),
-            "Test command".into(),
-            vec![],
-            vec![arg("arg1"), arg("arg2")],
-            vec![],
-        );
+        let command = script_command(vec![], vec![arg("arg1"), arg("arg2")], vec![]);
 
         let cli_command: CliCommand = command.to_cli();
 
@@ -265,14 +288,7 @@ mod tests {
 
     #[test]
     fn to_cli_adds_opts() {
-        let command = ScriptCommand::new(
-            "test".to_string(),
-            Some("echo test".to_string()),
-            "Test command".into(),
-            vec![opt("foo"), opt("bar")],
-            vec![],
-            vec![],
-        );
+        let command = script_command(vec![opt("foo"), opt("bar")], vec![], vec![]);
 
         let cli_command: CliCommand = command.to_cli();
 
@@ -288,10 +304,7 @@ mod tests {
 
     #[test]
     fn to_cli_adds_opts_and_args() {
-        let command = ScriptCommand::new(
-            "test".to_string(),
-            Some("echo test".to_string()),
-            "Test command".into(),
+        let command = script_command(
             vec![opt("foo"), opt("bar")],
             vec![arg("arg1"), arg("arg2")],
             vec![],
@@ -315,25 +328,12 @@ mod tests {
 
     #[test]
     fn to_cli_adds_sub_commands() {
-        let command = ScriptCommand::new(
-            "test".to_string(),
-            Some("echo test".to_string()),
-            "Test command".into(),
+        let command = script_command(
             vec![],
             vec![],
             vec![
-                Box::new(EmbeddedCommand::new(
-                    "sub",
-                    Some("echo sub"),
-                    vec![],
-                    vec![],
-                )),
-                Box::new(EmbeddedCommand::new(
-                    "sub2",
-                    Some("echo sub2"),
-                    vec![],
-                    vec![],
-                )),
+                Box::new(embedded_command(1, vec![], vec![])),
+                Box::new(embedded_command(2, vec![], vec![])),
             ],
         );
 
@@ -342,7 +342,47 @@ mod tests {
         let subs = cli_command.get_subcommands().collect::<Vec<_>>();
 
         assert_eq!(subs.len(), 2);
-        assert_eq!(subs[0].get_name(), "sub");
+        assert_eq!(subs[0].get_name(), "sub1");
         assert_eq!(subs[1].get_name(), "sub2");
+    }
+
+    #[test]
+    fn to_cli_makes_super_options_global() {
+        let command = ScriptCommand::new(
+            "test".to_string(),
+            Some("echo test".to_string()),
+            "Test command".into(),
+            vec![opt("foo"), opt("bar")],
+            vec![],
+            vec![Box::new(embedded_command(1, vec![], vec![]))],
+        );
+
+        let cli_command: CliCommand = command.to_cli();
+
+        let args = cli_command.get_arguments().collect::<Vec<_>>();
+
+        assert_eq!(args.len(), 2);
+        assert!(args[0].is_global_set());
+        assert!(args[1].is_global_set());
+    }
+
+    #[test]
+    fn to_cli_keeps_leaf_options_local() {
+        let command = ScriptCommand::new(
+            "test".to_string(),
+            Some("echo test".to_string()),
+            "Test command".into(),
+            vec![opt("foo"), opt("bar")],
+            vec![],
+            vec![],
+        );
+
+        let cli_command: CliCommand = command.to_cli();
+
+        let args = cli_command.get_arguments().collect::<Vec<_>>();
+
+        assert_eq!(args.len(), 2);
+        assert!(!args[0].is_global_set());
+        assert!(!args[1].is_global_set());
     }
 }

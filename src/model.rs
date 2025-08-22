@@ -155,6 +155,8 @@ pub(crate) trait Command {
 
     fn sub_commands(&self) -> &Vec<Box<dyn Command>>;
 
+    fn has_sub_commands(&self) -> bool;
+
     fn options(&self) -> &Vec<CommandOption>;
 
     fn args(&self) -> &Vec<CommandArg>;
@@ -169,7 +171,8 @@ pub(crate) trait Command {
     fn get_path(&self) -> Option<&PathBuf>;
 }
 
-/// A single CLI command.
+/// A command that is located in a script file. The command may have sub-commands that are functions
+/// in the script file.
 pub struct ScriptCommand {
     pub name: String,
     pub description: Option<String>,
@@ -247,6 +250,9 @@ impl Command for ScriptCommand {
         &self.sub_commands
     }
 
+    fn has_sub_commands(&self) -> bool {
+        !self.sub_commands.is_empty()
+    }
     fn options(&self) -> &Vec<CommandOption> {
         &self.options
     }
@@ -303,6 +309,10 @@ impl Command for EmbeddedCommand {
 
     fn sub_commands(&self) -> &Vec<Box<dyn Command>> {
         self.sub_commands.as_ref()
+    }
+
+    fn has_sub_commands(&self) -> bool {
+        !self.sub_commands.is_empty()
     }
 
     fn options(&self) -> &Vec<CommandOption> {
