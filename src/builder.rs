@@ -1,19 +1,13 @@
-use std::ops::{Range, RangeFrom, RangeTo};
 use std::path::PathBuf;
 
 use nom::branch::alt;
-use nom::bytes::complete::tag_no_case;
-use nom::bytes::streaming::is_not;
-use nom::character::complete::anychar;
-use nom::character::streaming::{multispace0, not_line_ending, space0};
-use nom::combinator::{flat_map, iterator, map, opt, rest, value};
+use nom::bytes::complete::{is_not, tag_no_case};
+use nom::character::complete::{anychar, multispace0, not_line_ending, space0};
+use nom::combinator::{iterator, map, opt, rest, value};
 use nom::error::ParseError;
-use nom::sequence::{delimited, pair, terminated, tuple};
+use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Err::{Error, Failure, Incomplete};
-use nom::{
-    sequence::preceded, Compare, IResult, InputIter, InputLength, InputTakeAtPosition, Parser,
-    Slice,
-};
+use nom::{Compare, IResult, Input, Parser};
 
 use crate::model::ArgType::Unknown;
 use crate::model::{ArgType, Command, CommandArg, CommandOption, EmbeddedCommand, ScriptCommand};
@@ -89,57 +83,50 @@ impl<T, O1, O2, E> FinishIncomplete<T, O1, E> for IResult<T, O2, E> {
     }
 }
 
-pub trait InputType:
-    InputTakeAtPosition<Item = char>
-    + Slice<Range<usize>>
-    + Slice<RangeFrom<usize>>
-    + Slice<RangeTo<usize>>
-    + InputIter<Item = char>
-    + InputLength
-    + Compare<&'static str>
-    + ToString
-{
-}
+pub trait InputType: Input<Item = char> + Compare<&'static str> + ToString {}
 
 impl InputType for &str {}
 
 fn padded<'a, T: InputType + 'a, O, E: ParseError<T>, F>(
     parser: F,
-) -> impl FnMut(T) -> IResult<T, O, E>
+) -> impl Parser<T, Output = O, Error = E>
 where
-    F: Parser<T, O, E>,
+    F: Parser<T, Output = O, Error = E>,
 {
     preceded(space0, parser)
 }
 
 fn identifier<'a, T: InputType + 'a, E: ParseError<T> + 'a>(input: T) -> IResult<T, T, E> {
-    is_not(" \t\r\n-")(input)
+    is_not(" \t\r\n-").parse(input)
 }
 
 fn ignore_tag<'a, T: InputType + 'a, E: ParseError<T> + 'a>(
     input: T,
 ) -> IResult<T, Option<DocTag>, E> {
-    value(Some(DocTag::Ignore), not_line_ending)(input)
+    value(Some(DocTag::Ignore), not_line_ending).parse(input)
 }
 
 fn name_tag<'a, T: InputType + 'a, E: ParseError<T> + 'a>(
     input: T,
 ) -> IResult<T, Option<DocTag>, E> {
-    terminated(preceded(multispace0, identifier), not_line_ending)(input)
+    terminated(preceded(multispace0, identifier), not_line_ending)
+        .parse(input)
         .map(|(i, o)| (i, Some(DocTag::Name(NameTag::new(o.to_string())))))
 }
 
 fn sub_tag<'a, T: InputType + 'a, E: ParseError<T> + 'a>(
     input: T,
 ) -> IResult<T, Option<DocTag>, E> {
-    terminated(preceded(multispace0, identifier), not_line_ending)(input)
+    terminated(preceded(multispace0, identifier), not_line_ending)
+        .parse(input)
         .map(|(i, o)| (i, Some(DocTag::Sub(SubTag::new(o.to_string(), None)))))
 }
 
 fn about_tag<'a, T: InputType + 'a, E: ParseError<T> + 'a>(
     input: T,
 ) -> IResult<T, Option<DocTag>, E> {
-    padded(not_line_ending)(input)
+    padded(not_line_ending)
+        .parse(input)
         .map(|(i, o)| (i, Some(DocTag::About(AboutTag::new(o.to_string())))))
 }
 
@@ -153,14 +140,16 @@ fn arg_var_arg<'a, T: InputType + 'a, E: ParseError<T> + 'a>(
     var_arg: bool,
     input: T,
 ) -> IResult<T, Option<DocTag>, E> {
-    preceded(multispace0, pair(identifier, padded(not_line_ending)))(input).map(|(i, o)| {
-        let name = o.0.to_string();
-        let details = o.1.to_string();
-        let inner_res =
-            arg_details::<nom::error::Error<&str>>(name.as_str(), var_arg, details.as_str());
+    preceded(multispace0, pair(identifier, padded(not_line_ending)))
+        .parse(input)
+        .map(|(i, o)| {
+            let name = o.0.to_string();
+            let details = o.1.to_string();
+            let inner_res =
+                arg_details::<nom::error::Error<&str>>(name.as_str(), var_arg, details.as_str());
 
-        (i, inner_res.map(|(_, o)| o).unwrap_or(None::<DocTag>))
-    })
+            (i, inner_res.map(|(_, o)| o).unwrap_or(None::<DocTag>))
+        })
 }
 
 fn var_arg_tag<'a, T: InputType + 'a, E: ParseError<T> + 'a>(
@@ -177,7 +166,8 @@ fn arg_type<'a, E: ParseError<&'a str> + 'a>(input: &'a str) -> IResult<&'a str,
             map(is_not(">"), ArgType::from),
             nom::character::complete::char('>'),
         ),
-    )(input)
+    )
+    .parse(input)
 }
 
 fn arg_details<'a, E: ParseError<&'a str> + 'a>(
@@ -186,11 +176,11 @@ fn arg_details<'a, E: ParseError<&'a str> + 'a>(
     input: &'a str,
 ) -> IResult<&'a str, Option<DocTag>, E> {
     map(
-        tuple((
+        (
             opt(padded_bool),
             opt(arg_type),
             preceded(nom::character::complete::space0, rest),
-        )),
+        ),
         |(optional, arg_type, rest)| {
             Some(DocTag::Arg(CommandArg::new(
                 name.to_string(),
@@ -200,7 +190,8 @@ fn arg_details<'a, E: ParseError<&'a str> + 'a>(
                 none_if_empty(rest),
             )))
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 fn none_if_empty(rest: &str) -> Option<String> {
@@ -214,14 +205,16 @@ fn none_if_empty(rest: &str) -> Option<String> {
 fn opt_tag<'a, T: InputType + 'a, E: ParseError<T> + 'a>(
     input: T,
 ) -> IResult<T, Option<DocTag>, E> {
-    preceded(multispace0, pair(identifier, padded(not_line_ending)))(input).map(|(i, o)| {
-        let name = o.0.to_string();
-        let details = o.1.to_string();
+    preceded(multispace0, pair(identifier, padded(not_line_ending)))
+        .parse(input)
+        .map(|(i, o)| {
+            let name = o.0.to_string();
+            let details = o.1.to_string();
 
-        let inner_res = opt_details::<nom::error::Error<&str>>(name.as_str(), details.as_str());
+            let inner_res = opt_details::<nom::error::Error<&str>>(name.as_str(), details.as_str());
 
-        (i, inner_res.map(|(_, o)| o).unwrap_or(None::<DocTag>))
-    })
+            (i, inner_res.map(|(_, o)| o).unwrap_or(None::<DocTag>))
+        })
 }
 
 fn opt_details<'a, E: ParseError<&'a str> + 'a>(
@@ -231,15 +224,15 @@ fn opt_details<'a, E: ParseError<&'a str> + 'a>(
     map(
         preceded(
             nom::character::complete::space0,
-            tuple((
+            (
                 opt(delimited(
                     nom::character::complete::char('\''),
-                    anychar::<&'a str, _>,
+                    anychar,
                     nom::character::complete::char('\''),
                 )),
                 padded_bool_default_false,
                 preceded(nom::character::complete::space0, rest),
-            )),
+            ),
         ),
         |(short, has_param, rest)| {
             Some(DocTag::Opt(CommandOption::new(
@@ -249,13 +242,14 @@ fn opt_details<'a, E: ParseError<&'a str> + 'a>(
                 none_if_empty(rest),
             )))
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 fn padded_bool_default_false<'a, E: ParseError<&'a str> + 'a>(
     input: &'a str,
 ) -> IResult<&'a str, bool, E> {
-    map(opt(padded_bool), |x| x.unwrap_or(false))(input)
+    map(opt(padded_bool), |x| x.unwrap_or(false)).parse(input)
 }
 
 fn padded_bool<'a, E: ParseError<&'a str> + 'a>(input: &'a str) -> IResult<&'a str, bool, E> {
@@ -265,58 +259,59 @@ fn padded_bool<'a, E: ParseError<&'a str> + 'a>(input: &'a str) -> IResult<&'a s
             value(true, tag_no_case(TRUE)),
             value(false, tag_no_case(FALSE)),
         )),
-    )(input)
+    )
+    .parse(input)
 }
 
 fn unknown_tag<'a, T: InputType + 'a, E: ParseError<T> + 'a>(
     input: T,
 ) -> IResult<T, Option<DocTag>, E> {
-    value(None, not_line_ending)(input)
-}
-
-fn parser_for_tag<'a, T: InputType + 'a, E: ParseError<T> + 'a>(
-    tag: T,
-) -> Box<dyn Parser<T, Option<DocTag>, E> + 'a> {
-    match tag.to_string().as_str() {
-        IGNORE_TAG => Box::new(ignore_tag),
-        NAME_TAG => Box::new(name_tag),
-        SUB_TAG => Box::new(sub_tag),
-        ABOUT_TAG => Box::new(about_tag),
-        ARG_TAG => Box::new(arg_tag),
-        VAR_ARG_TAG => Box::new(var_arg_tag),
-        OPT_TAG => Box::new(opt_tag),
-        _ => Box::new(unknown_tag),
-    }
+    value(None, preceded(anychar, not_line_ending)).parse(input)
 }
 
 fn doc_tag<'a, T: InputType + 'a, E: ParseError<T> + 'a>(
     input: T,
 ) -> IResult<T, Option<DocTag>, E> {
-    flat_map(identifier, parser_for_tag)(input)
+    preceded(
+        multispace0,
+        alt((
+            preceded(tag_no_case(IGNORE_TAG), ignore_tag),
+            preceded(tag_no_case(NAME_TAG), name_tag),
+            preceded(tag_no_case(SUB_TAG), sub_tag),
+            preceded(tag_no_case(ABOUT_TAG), about_tag),
+            preceded(tag_no_case(ARG_TAG), arg_tag),
+            preceded(tag_no_case(VAR_ARG_TAG), var_arg_tag),
+            preceded(tag_no_case(OPT_TAG), opt_tag),
+            value(None, not_line_ending),
+        )),
+    )
+    .parse(input)
 }
 
 fn doc_tag_or_not<'a, T: InputType + 'a, E: ParseError<T> + 'a>(
     input: T,
 ) -> IResult<T, Option<DocTag>, E> {
-    flat_map(preceded(multispace0, anychar), |c| {
-        if c == '@' {
-            doc_tag
-        } else {
-            unknown_tag
-        }
-    })(input)
+    alt((
+        preceded(
+            preceded(multispace0, nom::character::complete::char('@')),
+            doc_tag,
+        ),
+        unknown_tag,
+    ))
+    .parse(input)
 }
 
 fn comment_or_not<'a, T: InputType + 'a, E: ParseError<T> + 'a>(
     input: T,
 ) -> IResult<T, Option<DocTag>, E> {
-    flat_map(preceded(multispace0, anychar), |c| {
-        if c == '#' {
-            doc_tag_or_not
-        } else {
-            unknown_tag
-        }
-    })(input)
+    preceded(
+        multispace0,
+        alt((
+            preceded(nom::character::complete::char('#'), doc_tag_or_not),
+            unknown_tag,
+        )),
+    )
+    .parse(input)
 }
 
 fn collect<'a, T: InputType + Clone + 'a, E: ParseError<T> + 'a>(
@@ -326,15 +321,17 @@ fn collect<'a, T: InputType + Clone + 'a, E: ParseError<T> + 'a>(
     let mut iter = iterator(input, comment_or_not);
 
     // fold the tags into groups of tags, starting a new group when a sub tag is found
-    let groups = iter
-        .filter_map(|a| a)
-        .fold(vec![vec![]], |mut groups, tag| {
-            match tag {
-                DocTag::Sub(_) => groups.push(vec![tag]),
-                _ => groups.last_mut().unwrap().push(tag),
-            }
-            groups
-        });
+    let groups =
+        iter.by_ref()
+            .map(|a| a)
+            .filter_map(|a| a)
+            .fold(vec![vec![]], |mut groups, tag| {
+                match tag {
+                    DocTag::Sub(_) => groups.push(vec![tag]),
+                    _ => groups.last_mut().unwrap().push(tag),
+                }
+                groups
+            });
 
     iter.finish().finish_with_val(groups)
 }
