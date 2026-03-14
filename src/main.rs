@@ -95,7 +95,7 @@ fn exec_commands_script(model: Model, arg_matches: clap::ArgMatches) -> Vec<u8> 
 
     let mut current = matches;
 
-    let mut opts = Vec::<(&str, bool)>::new();
+    let mut opts = Vec::<(&str, String)>::new();
     let mut args = Vec::<(&str, String)>::new();
 
     // recursively collect subcommand names into a vector while it is not None
@@ -135,7 +135,7 @@ fn exec_commands_script(model: Model, arg_matches: clap::ArgMatches) -> Vec<u8> 
         &mut buffer,
         "cli_opts=({})",
         opts.iter()
-            .map(|opt| format!("\"{}\" {}", opt.0, opt.1))
+            .map(|opt| format!("\"{}\" \"{}\"", opt.0, opt.1))
             .collect::<Vec<String>>()
             .join(" ")
     )
@@ -153,7 +153,7 @@ fn exec_commands_script(model: Model, arg_matches: clap::ArgMatches) -> Vec<u8> 
 fn add_opts_and_args<'a>(
     matches: &'a ArgMatches,
     command: &'a Box<dyn Command>,
-    opts: &mut Vec<(&'a str, bool)>,
+    opts: &mut Vec<(&'a str, String)>,
     args: &mut Vec<(&'a str, String)>,
 ) {
     matches.ids().for_each(|id| {
@@ -161,11 +161,14 @@ fn add_opts_and_args<'a>(
 
         if let Some(option) = command.get_option(name) {
             if option.has_param {
-                todo!("Handle options with args")
+                let value_str = matches
+                    .get_one::<String>(name)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                opts.push((name, value_str));
             } else {
                 let opt_set = matches.get_flag(name);
-
-                opts.push((name, opt_set));
+                opts.push((name, opt_set.to_string()));
             }
         }
 
@@ -197,7 +200,7 @@ fn execute_cli(model: Model, cli: clap::Command, cli_args: Vec<String>) {
 
     let mut current = matches;
 
-    let mut opts = Vec::<(&str, bool)>::new();
+    let mut opts: Vec<(&str, String)> = Vec::<(&str, String)>::new();
     let mut args = Vec::<(&str, String)>::new();
 
     // recursively collect subcommand names into a vector while it is not None
@@ -350,9 +353,55 @@ fn handle_completions(mut cli: clap::Command, cli_name: &str, shell_name: String
 mod tests {
     use std::vec;
 
-    use crate::model::{ArgType, CommandArg, EmbeddedCommand, ScriptCommand};
+    use crate::model::{ArgType, CommandArg, CommandOption, EmbeddedCommand, ScriptCommand};
 
     use super::*;
+
+    #[test]
+    fn test_build_cli_args_with_opt_param() {
+        let bar: EmbeddedCommand = EmbeddedCommand::new(
+            "bar".to_owned(),
+            Option::<String>::None,
+            vec![CommandOption::new(
+                "output",
+                None,
+                true,
+                Option::<String>::None,
+            )],
+            vec![],
+        );
+
+        let foo = ScriptCommand::new(
+            "foo".to_owned(),
+            None,
+            PathBuf::from("/tmp/foo.sh"),
+            vec![],
+            vec![],
+            vec![Box::new(bar)],
+        );
+
+        let model = Model::new(vec![Box::new(foo)]);
+        let command = model.to_cli();
+
+        let out = build_embedded_script(
+            model,
+            command,
+            vec![
+                "blah".to_owned(),
+                "foo".to_owned(),
+                "bar".to_owned(),
+                "--output".to_owned(),
+                "out.txt".to_owned(),
+            ],
+        );
+
+        let out_str = String::from_utf8(out).expect("Failed to convert to string");
+        assert!(
+            out_str.contains(r#"cli_opts=("output" "out.txt")"#),
+            "expected output option value in cli_opts, got: {}",
+            out_str
+        );
+    }
 
     #[test]
     fn test_build_cli_args() {
