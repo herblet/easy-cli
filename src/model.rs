@@ -693,16 +693,15 @@ pub(crate) mod test {
         let _ = super::Model::from(test_dir.path());
         let cache_path = test_dir.path().join(super::CACHE_FILE);
 
-        let other_model = super::Model::new(vec![super::CommandEnum::Script(
-            super::ScriptCommand::new(
+        let other_model =
+            super::Model::new(vec![super::CommandEnum::Script(super::ScriptCommand::new(
                 "from_cache".to_string(),
                 Some("Script content".to_string()),
                 "from_script".into(),
                 vec![],
                 vec![],
                 vec![],
-            ),
-        )]);
+            ))]);
 
         other_model.save_to_cache(test_dir.path(), &cache_path);
 

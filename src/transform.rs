@@ -16,9 +16,9 @@ pub trait ToCliCommand {
 /// Converts an entire Model to a CliCommand
 impl ToCliCommand for Model {
     fn to_cli(&self) -> CliCommand {
-        self.commands.iter().fold(top_level(), |cli, command| {
-            cli.subcommand(command.to_cli())
-        })
+        self.commands
+            .iter()
+            .fold(top_level(), |cli, command| cli.subcommand(command.to_cli()))
     }
 }
 

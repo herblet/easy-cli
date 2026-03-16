@@ -144,7 +144,8 @@ fn exec_commands_script(model: Model, arg_matches: clap::ArgMatches) -> Vec<u8> 
         .expect("Failed to write to buffer");
 
     if current_command.get_path() == None {
-        writeln!(&mut buffer, " && {})", current_command.name()).expect("Failed to write to buffer");
+        writeln!(&mut buffer, " && {})", current_command.name())
+            .expect("Failed to write to buffer");
     }
 
     buffer
@@ -353,7 +354,9 @@ fn handle_completions(mut cli: clap::Command, cli_name: &str, shell_name: String
 mod tests {
     use std::vec;
 
-    use crate::model::{ArgType, CommandArg, CommandEnum, CommandOption, EmbeddedCommand, ScriptCommand};
+    use crate::model::{
+        ArgType, CommandArg, CommandEnum, CommandOption, EmbeddedCommand, ScriptCommand,
+    };
 
     use super::*;
 

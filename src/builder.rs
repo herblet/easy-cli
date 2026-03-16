@@ -10,7 +10,9 @@ use nom::Err::{Error, Failure, Incomplete};
 use nom::{Compare, IResult, Input, Parser};
 
 use crate::model::ArgType::Unknown;
-use crate::model::{ArgType, CommandArg, CommandEnum, CommandOption, EmbeddedCommand, ScriptCommand};
+use crate::model::{
+    ArgType, CommandArg, CommandEnum, CommandOption, EmbeddedCommand, ScriptCommand,
+};
 use crate::utils::strip_file_suffix;
 
 const TRUE: &'static str = "true";
