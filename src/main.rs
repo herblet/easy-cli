@@ -140,7 +140,7 @@ fn exec_commands_script(model: Model, arg_matches: clap::ArgMatches) -> Vec<u8> 
             .join(" ")
     )
     .expect("Failed to write to buffer");
-    write!(&mut buffer, "$(source \"{}\"", path.to_str().unwrap())
+    write!(&mut buffer, "(source \"{}\"", path.to_str().unwrap())
         .expect("Failed to write to buffer");
 
     if current_command.get_path() == None {
@@ -443,6 +443,6 @@ mod tests {
         );
 
         let out_str = String::from_utf8(out).expect("Failed to convert to string");
-        assert_eq!(out_str, "#eval\ntypeset -A cli_args\ncli_args=(\"arg1\" \"arg1Val\")\ntypeset -A cli_opts\ncli_opts=()\n$(source \"/tmp/foo.sh\" && bar)\n");
+        assert_eq!(out_str, "#eval\ntypeset -A cli_args\ncli_args=(\"arg1\" \"arg1Val\")\ntypeset -A cli_opts\ncli_opts=()\n(source \"/tmp/foo.sh\" && bar)\n");
     }
 }
