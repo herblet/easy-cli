@@ -443,6 +443,6 @@ mod tests {
         );
 
         let out_str = String::from_utf8(out).expect("Failed to convert to string");
-        assert_eq!(out_str, "#eval\ntypeset -A cli_args\ncli_args=(\"arg1\" \"arg1Val\")\ntypeset -A cli_opts\ncli_opts=()\nsource \"/tmp/foo.sh\"\nbar\n");
+        assert_eq!(out_str, "#eval\ntypeset -A cli_args\ncli_args=(\"arg1\" \"arg1Val\")\ntypeset -A cli_opts\ncli_opts=()\n$(source \"/tmp/foo.sh\" && bar)\n");
     }
 }
