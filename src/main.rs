@@ -140,11 +140,11 @@ fn exec_commands_script(model: Model, arg_matches: clap::ArgMatches) -> Vec<u8> 
             .join(" ")
     )
     .expect("Failed to write to buffer");
-    writeln!(&mut buffer, "source \"{}\"", path.to_str().unwrap())
+    write!(&mut buffer, "$(source \"{}\"", path.to_str().unwrap())
         .expect("Failed to write to buffer");
 
     if current_command.get_path() == None {
-        writeln!(&mut buffer, "{}", current_command.name()).expect("Failed to write to buffer");
+        writeln!(&mut buffer, " && {})", current_command.name()).expect("Failed to write to buffer");
     }
 
     buffer
