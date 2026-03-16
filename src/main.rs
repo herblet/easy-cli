@@ -7,7 +7,7 @@ use clap::{parser::ValuesRef, Arg, ArgMatches};
 use clap_complete::{generate, Shell};
 use log::debug;
 
-use crate::model::Command;
+use crate::model::{Command, CommandEnum};
 use crate::transform::ToCliCommand;
 use model::HasSubCommands;
 use model::Model;
@@ -152,7 +152,7 @@ fn exec_commands_script(model: Model, arg_matches: clap::ArgMatches) -> Vec<u8> 
 
 fn add_opts_and_args<'a>(
     matches: &'a ArgMatches,
-    command: &'a Box<dyn Command>,
+    command: &'a CommandEnum,
     opts: &mut Vec<(&'a str, String)>,
     args: &mut Vec<(&'a str, String)>,
 ) {
@@ -353,7 +353,7 @@ fn handle_completions(mut cli: clap::Command, cli_name: &str, shell_name: String
 mod tests {
     use std::vec;
 
-    use crate::model::{ArgType, CommandArg, CommandOption, EmbeddedCommand, ScriptCommand};
+    use crate::model::{ArgType, CommandArg, CommandEnum, CommandOption, EmbeddedCommand, ScriptCommand};
 
     use super::*;
 
@@ -377,10 +377,10 @@ mod tests {
             PathBuf::from("/tmp/foo.sh"),
             vec![],
             vec![],
-            vec![Box::new(bar)],
+            vec![CommandEnum::Embedded(bar)],
         );
 
-        let model = Model::new(vec![Box::new(foo)]);
+        let model = Model::new(vec![CommandEnum::Script(foo)]);
         let command = model.to_cli();
 
         let out = build_embedded_script(
@@ -424,10 +424,10 @@ mod tests {
             PathBuf::from("/tmp/foo.sh"),
             vec![],
             vec![],
-            vec![Box::new(bar)],
+            vec![CommandEnum::Embedded(bar)],
         );
 
-        let model = Model::new(vec![Box::new(foo)]);
+        let model = Model::new(vec![CommandEnum::Script(foo)]);
         let command = model.to_cli();
 
         // capture the ouput produced by embedded_commands

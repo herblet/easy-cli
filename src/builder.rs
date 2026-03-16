@@ -10,7 +10,7 @@ use nom::Err::{Error, Failure, Incomplete};
 use nom::{Compare, IResult, Input, Parser};
 
 use crate::model::ArgType::Unknown;
-use crate::model::{ArgType, Command, CommandArg, CommandOption, EmbeddedCommand, ScriptCommand};
+use crate::model::{ArgType, CommandArg, CommandEnum, CommandOption, EmbeddedCommand, ScriptCommand};
 use crate::utils::strip_file_suffix;
 
 const TRUE: &'static str = "true";
@@ -416,11 +416,11 @@ pub fn build_script_command(path: PathBuf) -> Result<Option<ScriptCommand>, Stri
                         Ok(EmbeddedCommand::new(sub_tag.name, description, opts, args))
                     })
                     .fold(
-                        Ok::<Vec<Box<dyn Command>>, String>(vec![]),
+                        Ok::<Vec<CommandEnum>, String>(vec![]),
                         |acc, res| match acc {
                             Ok(mut vec) => match res {
                                 Ok(val) => {
-                                    vec.push(Box::new(val));
+                                    vec.push(CommandEnum::Embedded(val));
                                     Ok(vec)
                                 }
                                 Err(e) => Err(e),

@@ -21,162 +21,158 @@ lazy_static! {
         Regex::new(r"# @ignore-at-root").expect("Failed to compile regex");
 }
 
-/// Serializable representation of the Model for caching.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SerializedModel {
-    pub commands: Vec<SerializedCommand>,
-}
-
-impl SerializedModel {
-    /// Make all paths relative to base_path for portability.
-    fn with_relative_paths(mut self, base_path: &Path) -> Self {
-        for cmd in &mut self.commands {
-            cmd.make_paths_relative(base_path);
-        }
-        self
-    }
-
-    /// Convert to Model, resolving paths relative to base_path.
-    fn into_model(self, base_path: &Path) -> Model {
-        let commands: Vec<Box<dyn Command>> = self
-            .commands
-            .into_iter()
-            .map(|c| c.into_command(base_path))
-            .collect();
-        Model::new(commands)
-    }
-}
-
-/// Serializable representation of a command (ScriptCommand or EmbeddedCommand).
+/// A concrete enum representing either a ScriptCommand or an EmbeddedCommand.
+/// Used in place of `Box<dyn Command>` to allow direct serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum SerializedCommand {
-    Script {
-        name: String,
-        description: Option<String>,
-        path: PathBuf,
-        options: Vec<CommandOption>,
-        args: Vec<CommandArg>,
-        sub_commands: Vec<SerializedCommand>,
-    },
-    Embedded {
-        name: String,
-        description: Option<String>,
-        options: Vec<CommandOption>,
-        args: Vec<CommandArg>,
-        sub_commands: Vec<SerializedCommand>,
-    },
+pub enum CommandEnum {
+    Script(ScriptCommand),
+    Embedded(EmbeddedCommand),
 }
 
-impl SerializedCommand {
-    /// Make paths relative to base_path for portability when saving.
+impl CommandEnum {
     fn make_paths_relative(&mut self, base_path: &Path) {
         match self {
-            SerializedCommand::Script {
-                path, sub_commands, ..
-            } => {
-                if path.is_absolute() {
-                    if let Ok(rel) = path.strip_prefix(base_path) {
-                        *path = rel.to_path_buf();
+            CommandEnum::Script(c) => {
+                if c.path.is_absolute() {
+                    if let Ok(rel) = c.path.strip_prefix(base_path) {
+                        c.path = rel.to_path_buf();
                     }
                 }
-                for cmd in sub_commands {
-                    cmd.make_paths_relative(base_path);
+                for sub in &mut c.sub_commands {
+                    sub.make_paths_relative(base_path);
                 }
             }
-            SerializedCommand::Embedded { sub_commands, .. } => {
-                for cmd in sub_commands {
-                    cmd.make_paths_relative(base_path);
+            CommandEnum::Embedded(c) => {
+                for sub in &mut c.sub_commands {
+                    sub.make_paths_relative(base_path);
                 }
             }
         }
     }
 
-    /// Convert to Box<dyn Command>, resolving paths relative to base_path if needed.
-    fn into_command(self, base_path: &Path) -> Box<dyn Command> {
+    fn resolve_paths(&mut self, base_path: &Path) {
         match self {
-            SerializedCommand::Script {
-                name,
-                description,
-                path,
-                options,
-                args,
-                sub_commands,
-            } => {
-                let path = if path.is_relative() {
-                    base_path.join(path)
-                } else {
-                    path
-                };
-                let sub_commands: Vec<Box<dyn Command>> = sub_commands
-                    .into_iter()
-                    .map(|c| c.into_command(base_path))
-                    .collect();
-                Box::new(ScriptCommand::new(
-                    name,
-                    description,
-                    path,
-                    options,
-                    args,
-                    sub_commands,
-                ))
+            CommandEnum::Script(c) => {
+                if c.path.is_relative() {
+                    c.path = base_path.join(&c.path);
+                }
+                for sub in &mut c.sub_commands {
+                    sub.resolve_paths(base_path);
+                }
             }
-            SerializedCommand::Embedded {
-                name,
-                description,
-                options,
-                args,
-                sub_commands,
-            } => {
-                let sub_commands: Vec<Box<dyn Command>> = sub_commands
-                    .into_iter()
-                    .map(|c| c.into_command(base_path))
-                    .collect();
-                Box::new(EmbeddedCommand::with_sub_commands(
-                    name,
-                    description,
-                    options,
-                    args,
-                    sub_commands,
-                ))
+            CommandEnum::Embedded(c) => {
+                for sub in &mut c.sub_commands {
+                    sub.resolve_paths(base_path);
+                }
             }
         }
     }
 }
 
+impl Command for CommandEnum {
+    fn name(&self) -> &str {
+        match self {
+            CommandEnum::Script(c) => c.name(),
+            CommandEnum::Embedded(c) => c.name(),
+        }
+    }
+
+    fn description(&self) -> Option<&str> {
+        match self {
+            CommandEnum::Script(c) => c.description(),
+            CommandEnum::Embedded(c) => c.description(),
+        }
+    }
+
+    fn exec(&self, args: Option<Vec<String>>) {
+        match self {
+            CommandEnum::Script(c) => c.exec(args),
+            CommandEnum::Embedded(c) => c.exec(args),
+        }
+    }
+
+    fn sub_commands(&self) -> &Vec<CommandEnum> {
+        match self {
+            CommandEnum::Script(c) => c.sub_commands(),
+            CommandEnum::Embedded(c) => c.sub_commands(),
+        }
+    }
+
+    fn has_sub_commands(&self) -> bool {
+        match self {
+            CommandEnum::Script(c) => c.has_sub_commands(),
+            CommandEnum::Embedded(c) => c.has_sub_commands(),
+        }
+    }
+
+    fn options(&self) -> &Vec<CommandOption> {
+        match self {
+            CommandEnum::Script(c) => c.options(),
+            CommandEnum::Embedded(c) => c.options(),
+        }
+    }
+
+    fn args(&self) -> &Vec<CommandArg> {
+        match self {
+            CommandEnum::Script(c) => c.args(),
+            CommandEnum::Embedded(c) => c.args(),
+        }
+    }
+
+    fn get_path(&self) -> Option<&PathBuf> {
+        match self {
+            CommandEnum::Script(c) => c.get_path(),
+            CommandEnum::Embedded(c) => c.get_path(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Model {
-    pub commands: Vec<Box<dyn Command>>,
+    pub commands: Vec<CommandEnum>,
 }
 
 pub trait HasSubCommands {
-    fn get_command(&self, name: &str) -> Option<&Box<dyn Command>>;
+    fn get_command(&self, name: &str) -> Option<&CommandEnum>;
 }
 
 /// The model of a single CLI tool.
 impl Model {
-    pub fn new(commands: Vec<Box<dyn Command>>) -> Model {
+    pub fn new(commands: Vec<CommandEnum>) -> Model {
         Model { commands }
     }
 
     pub fn from_cache(cache_path: &Path) -> Option<Model> {
         let file = File::open(cache_path).ok()?;
         let reader = BufReader::new(file);
-        let serialized: SerializedModel = serde_cbor::from_reader(reader).ok()?;
-        Some(serialized.into_model(cache_path.parent().unwrap()))
+        let mut model: Model = serde_cbor::from_reader(reader).ok()?;
+        model.resolve_paths(cache_path.parent().unwrap());
+        Some(model)
     }
 
     /// Save Model to cache file.
     pub fn save_to_cache(self: &Model, dir_path: &Path, cache_path: &Path) {
-        let serialized = SerializedModel {
-            commands: self.commands.iter().map(|c| c.as_serialized()).collect(),
-        }
-        .with_relative_paths(dir_path);
+        let mut model_to_save = self.clone();
+        model_to_save.make_paths_relative(dir_path);
 
         if let Ok(file) = File::create(cache_path) {
             let mut writer = BufWriter::new(file);
-            if serde_cbor::to_writer(&mut writer, &serialized).is_ok() {
+            if serde_cbor::to_writer(&mut writer, &model_to_save).is_ok() {
                 let _ = writer.flush();
             }
+        }
+    }
+
+    fn make_paths_relative(&mut self, base_path: &Path) {
+        for cmd in &mut self.commands {
+            cmd.make_paths_relative(base_path);
+        }
+    }
+
+    fn resolve_paths(&mut self, base_path: &Path) {
+        for cmd in &mut self.commands {
+            cmd.resolve_paths(base_path);
         }
     }
 }
@@ -213,7 +209,7 @@ impl<P: AsRef<Path>> From<P> for Model {
                                 build_script_command(entry_path)
                                     .ok()
                                     .flatten()
-                                    .map(|command| Box::new(command) as Box<dyn Command>)
+                                    .map(CommandEnum::Script)
                             })
                             .flatten()
                     })
@@ -260,8 +256,16 @@ fn try_load_from_cache(dir_path: &Path, cache_path: &Path) -> Option<Model> {
 }
 
 impl HasSubCommands for Model {
-    fn get_command(&self, name: &str) -> Option<&Box<dyn Command>> {
+    fn get_command(&self, name: &str) -> Option<&CommandEnum> {
         self.commands.iter().find(|command| command.name() == name)
+    }
+}
+
+impl HasSubCommands for CommandEnum {
+    fn get_command(&self, name: &str) -> Option<&CommandEnum> {
+        self.sub_commands()
+            .iter()
+            .find(|command| command.name() == name)
     }
 }
 
@@ -350,7 +354,7 @@ pub(crate) trait Command {
 
     fn exec(&self, args: Option<Vec<String>>);
 
-    fn sub_commands(&self) -> &Vec<Box<dyn Command>>;
+    fn sub_commands(&self) -> &Vec<CommandEnum>;
 
     fn has_sub_commands(&self) -> bool;
 
@@ -366,17 +370,15 @@ pub(crate) trait Command {
         self.args().iter().find(|arg| arg.name == name)
     }
     fn get_path(&self) -> Option<&PathBuf>;
-
-    /// Convert to serializable form for caching.
-    fn as_serialized(&self) -> SerializedCommand;
 }
 
 /// A command that is located in a script file. The command may have sub-commands that are functions
 /// in the script file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptCommand {
     pub name: String,
     pub description: Option<String>,
-    sub_commands: Vec<Box<dyn Command>>,
+    sub_commands: Vec<CommandEnum>,
     path: PathBuf,
     options: Vec<CommandOption>,
     args: Vec<CommandArg>,
@@ -389,7 +391,7 @@ impl ScriptCommand {
         path: PathBuf,
         options: Vec<CommandOption>,
         args: Vec<CommandArg>,
-        sub_commands: Vec<Box<dyn Command>>,
+        sub_commands: Vec<CommandEnum>,
     ) -> ScriptCommand {
         ScriptCommand {
             name,
@@ -402,35 +404,7 @@ impl ScriptCommand {
     }
 }
 
-impl<T> HasSubCommands for T
-where
-    T: AsRef<dyn Command>,
-{
-    fn get_command(&self, name: &str) -> Option<&Box<dyn Command>> {
-        let command: &dyn Command = self.as_ref();
-        command
-            .sub_commands()
-            .iter()
-            .find(|command| command.name() == name)
-    }
-}
-
 impl Command for ScriptCommand {
-    fn as_serialized(&self) -> SerializedCommand {
-        SerializedCommand::Script {
-            name: self.name.clone(),
-            description: self.description.clone(),
-            path: self.path.clone(),
-            options: self.options.clone(),
-            args: self.args.clone(),
-            sub_commands: self
-                .sub_commands
-                .iter()
-                .map(|c| c.as_serialized())
-                .collect(),
-        }
-    }
-
     fn name(&self) -> &str {
         self.name.as_str()
     }
@@ -461,7 +435,7 @@ impl Command for ScriptCommand {
         }
     }
 
-    fn sub_commands(&self) -> &Vec<Box<dyn Command>> {
+    fn sub_commands(&self) -> &Vec<CommandEnum> {
         &self.sub_commands
     }
 
@@ -480,12 +454,13 @@ impl Command for ScriptCommand {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddedCommand {
     name: String,
     description: Option<String>,
     options: Vec<CommandOption>,
     args: Vec<CommandArg>,
-    sub_commands: Vec<Box<dyn Command>>,
+    sub_commands: Vec<CommandEnum>,
 }
 
 impl EmbeddedCommand {
@@ -507,44 +482,9 @@ impl EmbeddedCommand {
             sub_commands: vec![],
         }
     }
-
-    /// Create an EmbeddedCommand with sub_commands (used when deserializing from cache).
-    pub fn with_sub_commands<S, T>(
-        name: S,
-        description: Option<T>,
-        options: Vec<CommandOption>,
-        args: Vec<CommandArg>,
-        sub_commands: Vec<Box<dyn Command>>,
-    ) -> EmbeddedCommand
-    where
-        S: Into<String>,
-        T: Into<String>,
-    {
-        EmbeddedCommand {
-            name: name.into(),
-            description: description.map(Into::into),
-            options,
-            args,
-            sub_commands,
-        }
-    }
 }
 
 impl Command for EmbeddedCommand {
-    fn as_serialized(&self) -> SerializedCommand {
-        SerializedCommand::Embedded {
-            name: self.name.clone(),
-            description: self.description.clone(),
-            options: self.options.clone(),
-            args: self.args.clone(),
-            sub_commands: self
-                .sub_commands
-                .iter()
-                .map(|c| c.as_serialized())
-                .collect(),
-        }
-    }
-
     fn name(&self) -> &str {
         self.name.as_str()
     }
@@ -557,7 +497,7 @@ impl Command for EmbeddedCommand {
         unimplemented!()
     }
 
-    fn sub_commands(&self) -> &Vec<Box<dyn Command>> {
+    fn sub_commands(&self) -> &Vec<CommandEnum> {
         self.sub_commands.as_ref()
     }
 
@@ -582,6 +522,8 @@ impl Command for EmbeddedCommand {
 pub(crate) mod test {
     use std::fs::File;
     use std::io::Write;
+
+    use super::Command;
 
     pub const NO_DESCRIPTION: Option<String> = None;
 
@@ -751,14 +693,16 @@ pub(crate) mod test {
         let _ = super::Model::from(test_dir.path());
         let cache_path = test_dir.path().join(super::CACHE_FILE);
 
-        let other_model = super::Model::new(vec![Box::new(super::ScriptCommand::new(
-            "from_cache".to_string(),
-            Some("Script content".to_string()),
-            "from_script".into(),
-            vec![],
-            vec![],
-            vec![],
-        ))]);
+        let other_model = super::Model::new(vec![super::CommandEnum::Script(
+            super::ScriptCommand::new(
+                "from_cache".to_string(),
+                Some("Script content".to_string()),
+                "from_script".into(),
+                vec![],
+                vec![],
+                vec![],
+            ),
+        )]);
 
         other_model.save_to_cache(test_dir.path(), &cache_path);
 
