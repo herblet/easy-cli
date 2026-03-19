@@ -161,7 +161,7 @@ fn add_opts_and_args<'a>(
         let name = id.as_str();
 
         if let Some(option) = command.get_option(name) {
-            if option.has_param {
+            if let Some(_) = &option.param_type {
                 let value_str = matches
                     .get_one::<String>(name)
                     .map(|s| s.to_string())
@@ -368,7 +368,7 @@ mod tests {
             vec![CommandOption::new(
                 "output",
                 None,
-                true,
+                Some(ArgType::Unknown),
                 Option::<String>::None,
             )],
             vec![],

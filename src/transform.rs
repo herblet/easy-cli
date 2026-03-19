@@ -109,10 +109,11 @@ impl ToArg for CommandOption {
             .long(self.name.to_owned())
             .help(self.description.as_deref().unwrap_or("").to_string());
 
-        if !self.has_param {
-            cli_option = cli_option.num_args(0).action(ArgAction::SetTrue);
-        } else {
+        if let Some(param_type) = &self.param_type {
+            cli_option = cli_option.value_hint(param_type.to_value_hint());
             cli_option = cli_option.value_parser(StringValueParser::default());
+        } else {
+            cli_option = cli_option.num_args(0).action(ArgAction::SetTrue);
         }
 
         cli_option
@@ -269,7 +270,7 @@ mod tests {
         CommandOption::new(
             name,
             Some(name.chars().next().unwrap()),
-            false,
+            None,
             NO_DESCRIPTION,
         )
     }

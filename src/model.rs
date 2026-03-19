@@ -326,12 +326,17 @@ impl CommandArg {
 pub struct CommandOption {
     pub name: String,
     pub short: Option<char>,
-    pub has_param: bool,
+    pub param_type: Option<ArgType>,
     pub description: Option<String>,
 }
 
 impl CommandOption {
-    pub fn new<S, T>(name: S, short: Option<char>, has_param: bool, description: Option<T>) -> Self
+    pub fn new<S, T>(
+        name: S,
+        short: Option<char>,
+        param_type: Option<ArgType>,
+        description: Option<T>,
+    ) -> Self
     where
         S: Into<String>,
         T: Into<String>,
@@ -339,7 +344,7 @@ impl CommandOption {
         CommandOption {
             name: name.into(),
             short,
-            has_param,
+            param_type,
             description: description.map(Into::into),
         }
     }
