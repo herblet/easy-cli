@@ -7,7 +7,7 @@ use clap::{parser::ValuesRef, Arg, ArgMatches};
 use clap_complete::{generate, Shell};
 use log::debug;
 
-use crate::model::Command;
+use crate::model::{Command, CommandEnum};
 use crate::transform::ToCliCommand;
 use model::HasSubCommands;
 use model::Model;
@@ -140,11 +140,12 @@ fn exec_commands_script(model: Model, arg_matches: clap::ArgMatches) -> Vec<u8> 
             .join(" ")
     )
     .expect("Failed to write to buffer");
-    writeln!(&mut buffer, "source \"{}\"", path.to_str().unwrap())
+    write!(&mut buffer, "(source \"{}\"", path.to_str().unwrap())
         .expect("Failed to write to buffer");
 
     if current_command.get_path() == None {
-        writeln!(&mut buffer, "{}", current_command.name()).expect("Failed to write to buffer");
+        writeln!(&mut buffer, " && {})", current_command.name())
+            .expect("Failed to write to buffer");
     }
 
     buffer
@@ -152,7 +153,7 @@ fn exec_commands_script(model: Model, arg_matches: clap::ArgMatches) -> Vec<u8> 
 
 fn add_opts_and_args<'a>(
     matches: &'a ArgMatches,
-    command: &'a Box<dyn Command>,
+    command: &'a CommandEnum,
     opts: &mut Vec<(&'a str, String)>,
     args: &mut Vec<(&'a str, String)>,
 ) {
@@ -160,7 +161,7 @@ fn add_opts_and_args<'a>(
         let name = id.as_str();
 
         if let Some(option) = command.get_option(name) {
-            if option.has_param {
+            if let Some(_) = &option.param_type {
                 let value_str = matches
                     .get_one::<String>(name)
                     .map(|s| s.to_string())
@@ -353,7 +354,9 @@ fn handle_completions(mut cli: clap::Command, cli_name: &str, shell_name: String
 mod tests {
     use std::vec;
 
-    use crate::model::{ArgType, CommandArg, CommandOption, EmbeddedCommand, ScriptCommand};
+    use crate::model::{
+        ArgType, CommandArg, CommandEnum, CommandOption, EmbeddedCommand, ScriptCommand,
+    };
 
     use super::*;
 
@@ -365,7 +368,7 @@ mod tests {
             vec![CommandOption::new(
                 "output",
                 None,
-                true,
+                Some(ArgType::Unknown),
                 Option::<String>::None,
             )],
             vec![],
@@ -377,10 +380,10 @@ mod tests {
             PathBuf::from("/tmp/foo.sh"),
             vec![],
             vec![],
-            vec![Box::new(bar)],
+            vec![CommandEnum::Embedded(bar)],
         );
 
-        let model = Model::new(vec![Box::new(foo)]);
+        let model = Model::new(vec![CommandEnum::Script(foo)]);
         let command = model.to_cli();
 
         let out = build_embedded_script(
@@ -424,10 +427,10 @@ mod tests {
             PathBuf::from("/tmp/foo.sh"),
             vec![],
             vec![],
-            vec![Box::new(bar)],
+            vec![CommandEnum::Embedded(bar)],
         );
 
-        let model = Model::new(vec![Box::new(foo)]);
+        let model = Model::new(vec![CommandEnum::Script(foo)]);
         let command = model.to_cli();
 
         // capture the ouput produced by embedded_commands
@@ -443,6 +446,6 @@ mod tests {
         );
 
         let out_str = String::from_utf8(out).expect("Failed to convert to string");
-        assert_eq!(out_str, "#eval\ntypeset -A cli_args\ncli_args=(\"arg1\" \"arg1Val\")\ntypeset -A cli_opts\ncli_opts=()\nsource \"/tmp/foo.sh\"\nbar\n");
+        assert_eq!(out_str, "#eval\ntypeset -A cli_args\ncli_args=(\"arg1\" \"arg1Val\")\ntypeset -A cli_opts\ncli_opts=()\n(source \"/tmp/foo.sh\" && bar)\n");
     }
 }

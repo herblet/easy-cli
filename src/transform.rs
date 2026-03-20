@@ -16,9 +16,9 @@ pub trait ToCliCommand {
 /// Converts an entire Model to a CliCommand
 impl ToCliCommand for Model {
     fn to_cli(&self) -> CliCommand {
-        self.commands.iter().fold(top_level(), |cli, command| {
-            cli.subcommand(command.as_ref().to_cli())
-        })
+        self.commands
+            .iter()
+            .fold(top_level(), |cli, command| cli.subcommand(command.to_cli()))
     }
 }
 
@@ -52,7 +52,7 @@ impl<C: ?Sized + Command> ToCliCommand for C {
         // Add the sub_commands
         self.sub_commands()
             .iter()
-            .map(|sub| sub.as_ref().to_cli())
+            .map(|sub| sub.to_cli())
             .fold(cli_command, |parent, sub_command| {
                 parent.subcommand(sub_command)
             })
@@ -109,10 +109,11 @@ impl ToArg for CommandOption {
             .long(self.name.to_owned())
             .help(self.description.as_deref().unwrap_or("").to_string());
 
-        if !self.has_param {
-            cli_option = cli_option.num_args(0).action(ArgAction::SetTrue);
-        } else {
+        if let Some(param_type) = &self.param_type {
+            cli_option = cli_option.value_hint(param_type.to_value_hint());
             cli_option = cli_option.value_parser(StringValueParser::default());
+        } else {
+            cli_option = cli_option.num_args(0).action(ArgAction::SetTrue);
         }
 
         cli_option
@@ -122,7 +123,7 @@ impl ToArg for CommandOption {
 #[cfg(test)]
 mod tests {
     use crate::model::test::NO_DESCRIPTION;
-    use crate::model::{ArgType, EmbeddedCommand, ScriptCommand};
+    use crate::model::{ArgType, CommandEnum, EmbeddedCommand, ScriptCommand};
 
     use super::*;
 
@@ -226,7 +227,7 @@ mod tests {
             vec![],
             vec![],
         );
-        let model = Model::new(vec![Box::new(command)]);
+        let model = Model::new(vec![CommandEnum::Script(command)]);
 
         let cli_command: CliCommand = model.to_cli();
 
@@ -236,7 +237,7 @@ mod tests {
     fn script_command(
         opts: Vec<CommandOption>,
         args: Vec<CommandArg>,
-        sub: Vec<Box<dyn Command>>,
+        sub: Vec<CommandEnum>,
     ) -> ScriptCommand {
         ScriptCommand::new(
             "test".to_string(),
@@ -269,7 +270,7 @@ mod tests {
         CommandOption::new(
             name,
             Some(name.chars().next().unwrap()),
-            false,
+            None,
             NO_DESCRIPTION,
         )
     }
@@ -332,8 +333,8 @@ mod tests {
             vec![],
             vec![],
             vec![
-                Box::new(embedded_command(1, vec![], vec![])),
-                Box::new(embedded_command(2, vec![], vec![])),
+                CommandEnum::Embedded(embedded_command(1, vec![], vec![])),
+                CommandEnum::Embedded(embedded_command(2, vec![], vec![])),
             ],
         );
 
@@ -354,7 +355,7 @@ mod tests {
             "Test command".into(),
             vec![opt("foo"), opt("bar")],
             vec![],
-            vec![Box::new(embedded_command(1, vec![], vec![]))],
+            vec![CommandEnum::Embedded(embedded_command(1, vec![], vec![]))],
         );
 
         let cli_command: CliCommand = command.to_cli();

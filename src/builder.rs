@@ -10,7 +10,9 @@ use nom::Err::{Error, Failure, Incomplete};
 use nom::{Compare, IResult, Input, Parser};
 
 use crate::model::ArgType::Unknown;
-use crate::model::{ArgType, Command, CommandArg, CommandOption, EmbeddedCommand, ScriptCommand};
+use crate::model::{
+    ArgType, CommandArg, CommandEnum, CommandOption, EmbeddedCommand, ScriptCommand,
+};
 use crate::utils::strip_file_suffix;
 
 const TRUE: &'static str = "true";
@@ -230,17 +232,33 @@ fn opt_details<'a, E: ParseError<&'a str> + 'a>(
                     anychar,
                     nom::character::complete::char('\''),
                 )),
-                padded_bool_default_false,
+                opt_param,
                 preceded(nom::character::complete::space0, rest),
             ),
         ),
-        |(short, has_param, rest)| {
+        |(short, arg_type, rest)| {
             Some(DocTag::Opt(CommandOption::new(
                 name.to_string(),
                 short,
-                has_param,
+                arg_type,
                 none_if_empty(rest),
             )))
+        },
+    )
+    .parse(input)
+}
+
+fn opt_param<'a, E: ParseError<&'a str> + 'a>(
+    input: &'a str,
+) -> IResult<&'a str, Option<ArgType>, E> {
+    map(
+        (padded_bool_default_false, opt(arg_type)),
+        |(has_param, arg_type)| {
+            if has_param {
+                arg_type.or(Some(ArgType::Unknown))
+            } else {
+                None
+            }
         },
     )
     .parse(input)
@@ -344,7 +362,14 @@ fn default_name(path: &PathBuf) -> String {
 }
 
 pub fn build_script_command(path: PathBuf) -> Result<Option<ScriptCommand>, String> {
-    let mut file_content = std::fs::read_to_string(&path).unwrap();
+    let file_result = std::fs::read_to_string(&path);
+
+    // If the file can't be read it is probably binary; ignore it rather than erroring
+    if file_result.is_err() {
+        return Ok(None);
+    }
+
+    let mut file_content = file_result.unwrap();
 
     // Until streaming is implemented properly and we can handle incomplete, make sure the file
     // ends with a newline, otherwise we may miss the last tag
@@ -416,11 +441,11 @@ pub fn build_script_command(path: PathBuf) -> Result<Option<ScriptCommand>, Stri
                         Ok(EmbeddedCommand::new(sub_tag.name, description, opts, args))
                     })
                     .fold(
-                        Ok::<Vec<Box<dyn Command>>, String>(vec![]),
+                        Ok::<Vec<CommandEnum>, String>(vec![]),
                         |acc, res| match acc {
                             Ok(mut vec) => match res {
                                 Ok(val) => {
-                                    vec.push(Box::new(val));
+                                    vec.push(CommandEnum::Embedded(val));
                                     Ok(vec)
                                 }
                                 Err(e) => Err(e),
@@ -751,7 +776,7 @@ mod test {
             DocTag::Opt(CommandOption::new(
                 "fooBar".to_string(),
                 None,
-                false,
+                None,
                 NO_DESCRIPTION
             ))
         );
@@ -772,7 +797,7 @@ mod test {
             DocTag::Opt(CommandOption::new(
                 "fooBar".to_string(),
                 Some('f'),
-                false,
+                Option::None,
                 NO_DESCRIPTION,
             ))
         );
@@ -793,7 +818,7 @@ mod test {
             DocTag::Opt(CommandOption::new(
                 "fooBar".to_string(),
                 None,
-                true,
+                Option::Some(ArgType::Unknown),
                 NO_DESCRIPTION
             ))
         );
@@ -814,7 +839,7 @@ mod test {
             DocTag::Opt(CommandOption::new(
                 "fooBar".to_string(),
                 Some('d'),
-                true,
+                Option::Some(ArgType::Unknown),
                 NO_DESCRIPTION,
             ))
         );
@@ -835,7 +860,7 @@ mod test {
             DocTag::Opt(CommandOption::new(
                 "fooBar".to_string(),
                 None,
-                false,
+                Option::None,
                 Some("This param".to_string()),
             ))
         );
@@ -856,7 +881,7 @@ mod test {
             DocTag::Opt(CommandOption::new(
                 "fooBar".to_string(),
                 Some('e'),
-                true,
+                Option::Some(ArgType::Unknown),
                 Some("This param".to_string()),
             ))
         );
@@ -877,7 +902,28 @@ mod test {
             DocTag::Opt(CommandOption::new(
                 "fooBar".to_string(),
                 None,
-                false,
+                Option::None,
+                Some("A great option".to_string()),
+            ))
+        );
+    }
+
+    #[test]
+    fn opt_tag_accepts_arg_type() {
+        let input = indoc! {"
+            fooBar true <File>A great option
+            "};
+
+        let res = opt_tag::<&str, nom::error::Error<&str>>(input);
+
+        let (_, sub) = res.unwrap();
+
+        assert_eq!(
+            sub.unwrap(),
+            DocTag::Opt(CommandOption::new(
+                "fooBar".to_string(),
+                None,
+                Option::Some(ArgType::File),
                 Some("A great option".to_string()),
             ))
         );
@@ -945,7 +991,7 @@ mod test {
 
         assert_eq!(option.name, "longname");
         assert_eq!(option.short, Some('l'));
-        assert_eq!(option.has_param, true);
+        assert_eq!(option.param_type, Some(ArgType::Unknown));
         assert_eq!(
             option.description,
             Some("The description of longname".to_string())

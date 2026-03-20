@@ -1,4 +1,5 @@
-use std::fs::read_dir;
+use std::fs::{read_dir, File};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
 use std::{
     path::PathBuf,
@@ -7,6 +8,7 @@ use std::{
 
 use lazy_static::lazy_static;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 use crate::builder::build_script_command;
 
@@ -17,23 +19,163 @@ lazy_static! {
         Regex::new(r"# @ignore-at-root").expect("Failed to compile regex");
 }
 
+/// A concrete enum representing either a ScriptCommand or an EmbeddedCommand.
+/// Used in place of `Box<dyn Command>` to allow direct serialization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CommandEnum {
+    Script(ScriptCommand),
+    Embedded(EmbeddedCommand),
+}
+
+impl CommandEnum {
+    fn make_paths_relative(&mut self, base_path: &Path) {
+        match self {
+            CommandEnum::Script(c) => {
+                if c.path.is_absolute() {
+                    if let Ok(rel) = c.path.strip_prefix(base_path) {
+                        c.path = rel.to_path_buf();
+                    }
+                }
+                for sub in &mut c.sub_commands {
+                    sub.make_paths_relative(base_path);
+                }
+            }
+            CommandEnum::Embedded(c) => {
+                for sub in &mut c.sub_commands {
+                    sub.make_paths_relative(base_path);
+                }
+            }
+        }
+    }
+
+    fn resolve_paths(&mut self, base_path: &Path) {
+        match self {
+            CommandEnum::Script(c) => {
+                if c.path.is_relative() {
+                    c.path = base_path.join(&c.path);
+                }
+                for sub in &mut c.sub_commands {
+                    sub.resolve_paths(base_path);
+                }
+            }
+            CommandEnum::Embedded(c) => {
+                for sub in &mut c.sub_commands {
+                    sub.resolve_paths(base_path);
+                }
+            }
+        }
+    }
+}
+
+impl Command for CommandEnum {
+    fn name(&self) -> &str {
+        match self {
+            CommandEnum::Script(c) => c.name(),
+            CommandEnum::Embedded(c) => c.name(),
+        }
+    }
+
+    fn description(&self) -> Option<&str> {
+        match self {
+            CommandEnum::Script(c) => c.description(),
+            CommandEnum::Embedded(c) => c.description(),
+        }
+    }
+
+    fn exec(&self, args: Option<Vec<String>>) {
+        match self {
+            CommandEnum::Script(c) => c.exec(args),
+            CommandEnum::Embedded(c) => c.exec(args),
+        }
+    }
+
+    fn sub_commands(&self) -> &Vec<CommandEnum> {
+        match self {
+            CommandEnum::Script(c) => c.sub_commands(),
+            CommandEnum::Embedded(c) => c.sub_commands(),
+        }
+    }
+
+    fn has_sub_commands(&self) -> bool {
+        match self {
+            CommandEnum::Script(c) => c.has_sub_commands(),
+            CommandEnum::Embedded(c) => c.has_sub_commands(),
+        }
+    }
+
+    fn options(&self) -> &Vec<CommandOption> {
+        match self {
+            CommandEnum::Script(c) => c.options(),
+            CommandEnum::Embedded(c) => c.options(),
+        }
+    }
+
+    fn args(&self) -> &Vec<CommandArg> {
+        match self {
+            CommandEnum::Script(c) => c.args(),
+            CommandEnum::Embedded(c) => c.args(),
+        }
+    }
+
+    fn get_path(&self) -> Option<&PathBuf> {
+        match self {
+            CommandEnum::Script(c) => c.get_path(),
+            CommandEnum::Embedded(c) => c.get_path(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Model {
-    pub commands: Vec<Box<dyn Command>>,
+    pub commands: Vec<CommandEnum>,
 }
 
 pub trait HasSubCommands {
-    fn get_command(&self, name: &str) -> Option<&Box<dyn Command>>;
+    fn get_command(&self, name: &str) -> Option<&CommandEnum>;
 }
 
 /// The model of a single CLI tool.
 impl Model {
-    pub fn new(commands: Vec<Box<dyn Command>>) -> Model {
+    pub fn new(commands: Vec<CommandEnum>) -> Model {
         Model { commands }
     }
-}
 
-impl<P: AsRef<Path>> From<P> for Model {
-    fn from(path: P) -> Self {
+    pub fn from_cache(cache_path: &Path, scripts_dir: &Path) -> Option<Model> {
+        let file = File::open(cache_path).ok()?;
+        let reader = BufReader::new(file);
+        let mut model: Model = serde_cbor::from_reader(reader).ok()?;
+        model.resolve_paths(scripts_dir);
+        Some(model)
+    }
+
+    /// Save Model to cache file.
+    pub fn save_to_cache(self: &Model, dir_path: &Path, cache_path: &Path) {
+        let mut model_to_save = self.clone();
+        model_to_save.make_paths_relative(dir_path);
+
+        if let Ok(file) = File::create(cache_path) {
+            let mut writer = BufWriter::new(file);
+            if serde_cbor::to_writer(&mut writer, &model_to_save).is_ok() {
+                let _ = writer.flush();
+            }
+        }
+    }
+
+    fn make_paths_relative(&mut self, base_path: &Path) {
+        for cmd in &mut self.commands {
+            cmd.make_paths_relative(base_path);
+        }
+    }
+
+    fn resolve_paths(&mut self, base_path: &Path) {
+        for cmd in &mut self.commands {
+            cmd.resolve_paths(base_path);
+        }
+    }
+
+    fn build_model_from_scripts(path: &PathBuf) -> Self {
+        // Build from scratch
         let commands = read_dir(path)
             .map(|scripts| {
                 scripts
@@ -47,11 +189,11 @@ impl<P: AsRef<Path>> From<P> for Model {
                                     .map_or(false, |file_type| file_type.is_file())
                             })
                             .map(|entry| {
-                                let path = entry.path();
-                                build_script_command(path)
+                                let entry_path = entry.path();
+                                build_script_command(entry_path)
                                     .ok()
                                     .flatten()
-                                    .map(|command| Box::new(command) as Box<dyn Command>)
+                                    .map(CommandEnum::Script)
                             })
                             .flatten()
                     })
@@ -60,15 +202,74 @@ impl<P: AsRef<Path>> From<P> for Model {
             .unwrap_or(Vec::new());
         Model::new(commands)
     }
+
+    /// Try to load Model from cache if it exists and is more recent than all other files.
+    fn try_load_from_cache(dir_path: &Path, cache_path: &Path) -> Option<Self> {
+        let cache_meta = std::fs::metadata(cache_path).ok()?;
+        if !cache_meta.is_file() {
+            return None;
+        }
+        let cache_mtime = cache_meta.modified().ok()?;
+
+        // Check that cache is newer than all files in the scripts directory
+        let entries = read_dir(dir_path).ok()?;
+        for entry in entries.filter_map(Result::ok) {
+            if let Ok(ft) = entry.file_type() {
+                if ft.is_file() {
+                    if let Ok(entry_mtime) = entry.metadata().and_then(|m| m.modified()) {
+                        if entry_mtime > cache_mtime {
+                            return None; // A file is newer than cache, rebuild
+                        }
+                    }
+                }
+            }
+        }
+
+        // Load from cache
+        Model::from_cache(cache_path, dir_path)
+    }
+
+    fn cached_or_build(path: PathBuf) -> Self {
+        let cache_path = crate::utils::cache_path_for(&path);
+
+        if let Some(cp) = &cache_path {
+            if let Some(model) = Model::try_load_from_cache(&path, cp) {
+                return model;
+            }
+        }
+
+        let model = Model::build_model_from_scripts(&path);
+
+        if let Some(cp) = &cache_path {
+            model.save_to_cache(&path, cp);
+        }
+
+        model
+    }
+}
+
+impl<P: AsRef<Path>> From<P> for Model {
+    fn from(path: P) -> Self {
+        let path = path.as_ref().to_path_buf();
+        Model::cached_or_build(path)
+    }
 }
 
 impl HasSubCommands for Model {
-    fn get_command(&self, name: &str) -> Option<&Box<dyn Command>> {
+    fn get_command(&self, name: &str) -> Option<&CommandEnum> {
         self.commands.iter().find(|command| command.name() == name)
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl HasSubCommands for CommandEnum {
+    fn get_command(&self, name: &str) -> Option<&CommandEnum> {
+        self.sub_commands()
+            .iter()
+            .find(|command| command.name() == name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ArgType {
     Unknown,
     Path,
@@ -90,7 +291,7 @@ impl From<&str> for ArgType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandArg {
     pub name: String,
     pub optional: bool,
@@ -121,16 +322,21 @@ impl CommandArg {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandOption {
     pub name: String,
     pub short: Option<char>,
-    pub has_param: bool,
+    pub param_type: Option<ArgType>,
     pub description: Option<String>,
 }
 
 impl CommandOption {
-    pub fn new<S, T>(name: S, short: Option<char>, has_param: bool, description: Option<T>) -> Self
+    pub fn new<S, T>(
+        name: S,
+        short: Option<char>,
+        param_type: Option<ArgType>,
+        description: Option<T>,
+    ) -> Self
     where
         S: Into<String>,
         T: Into<String>,
@@ -138,7 +344,7 @@ impl CommandOption {
         CommandOption {
             name: name.into(),
             short,
-            has_param,
+            param_type,
             description: description.map(Into::into),
         }
     }
@@ -153,7 +359,7 @@ pub(crate) trait Command {
 
     fn exec(&self, args: Option<Vec<String>>);
 
-    fn sub_commands(&self) -> &Vec<Box<dyn Command>>;
+    fn sub_commands(&self) -> &Vec<CommandEnum>;
 
     fn has_sub_commands(&self) -> bool;
 
@@ -173,10 +379,11 @@ pub(crate) trait Command {
 
 /// A command that is located in a script file. The command may have sub-commands that are functions
 /// in the script file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptCommand {
     pub name: String,
     pub description: Option<String>,
-    sub_commands: Vec<Box<dyn Command>>,
+    sub_commands: Vec<CommandEnum>,
     path: PathBuf,
     options: Vec<CommandOption>,
     args: Vec<CommandArg>,
@@ -189,7 +396,7 @@ impl ScriptCommand {
         path: PathBuf,
         options: Vec<CommandOption>,
         args: Vec<CommandArg>,
-        sub_commands: Vec<Box<dyn Command>>,
+        sub_commands: Vec<CommandEnum>,
     ) -> ScriptCommand {
         ScriptCommand {
             name,
@@ -199,19 +406,6 @@ impl ScriptCommand {
             args,
             sub_commands,
         }
-    }
-}
-
-impl<T> HasSubCommands for T
-where
-    T: AsRef<dyn Command>,
-{
-    fn get_command(&self, name: &str) -> Option<&Box<dyn Command>> {
-        let command: &dyn Command = self.as_ref();
-        command
-            .sub_commands()
-            .iter()
-            .find(|command| command.name() == name)
     }
 }
 
@@ -246,7 +440,7 @@ impl Command for ScriptCommand {
         }
     }
 
-    fn sub_commands(&self) -> &Vec<Box<dyn Command>> {
+    fn sub_commands(&self) -> &Vec<CommandEnum> {
         &self.sub_commands
     }
 
@@ -265,12 +459,13 @@ impl Command for ScriptCommand {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddedCommand {
     name: String,
     description: Option<String>,
     options: Vec<CommandOption>,
     args: Vec<CommandArg>,
-    sub_commands: Vec<Box<dyn Command>>,
+    sub_commands: Vec<CommandEnum>,
 }
 
 impl EmbeddedCommand {
@@ -307,7 +502,7 @@ impl Command for EmbeddedCommand {
         unimplemented!()
     }
 
-    fn sub_commands(&self) -> &Vec<Box<dyn Command>> {
+    fn sub_commands(&self) -> &Vec<CommandEnum> {
         self.sub_commands.as_ref()
     }
 
@@ -332,6 +527,10 @@ impl Command for EmbeddedCommand {
 pub(crate) mod test {
     use std::fs::File;
     use std::io::Write;
+
+    use crate::utils::cache_path_for;
+
+    use super::Command;
 
     pub const NO_DESCRIPTION: Option<String> = None;
 
@@ -361,6 +560,11 @@ pub(crate) mod test {
         names.sort();
 
         assert_eq!(names.join(","), "script1,script2");
+
+        std::fs::remove_file(script1_path).unwrap();
+        std::fs::remove_file(script2_path).unwrap();
+        std::fs::remove_file(cache_path_for(test_dir.path()).unwrap()).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
     }
 
     #[test]
@@ -386,6 +590,11 @@ pub(crate) mod test {
 
         assert_eq!(model.commands.len(), 1);
         assert_eq!(model.commands[0].name(), "script1");
+
+        std::fs::remove_file(script1_path).unwrap();
+        std::fs::remove_dir(subdir_path).unwrap();
+        std::fs::remove_file(cache_path_for(test_dir.path()).unwrap()).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
     }
 
     #[test]
@@ -413,6 +622,10 @@ pub(crate) mod test {
         names.sort();
 
         assert_eq!(names.join(","), "sub1,sub2");
+
+        std::fs::remove_file(script1_path).unwrap();
+        std::fs::remove_file(cache_path_for(test_dir.path()).unwrap()).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
     }
 
     #[test]
@@ -449,6 +662,11 @@ pub(crate) mod test {
         names.sort();
 
         assert_eq!(names.join(","), "sub1,sub2");
+
+        std::fs::remove_file(script1_path).unwrap();
+        std::fs::remove_file(script2_path).unwrap();
+        std::fs::remove_file(cache_path_for(test_dir.path()).unwrap()).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
     }
 
     #[test]
@@ -463,5 +681,109 @@ pub(crate) mod test {
         // Any other value is unknown
         assert_eq!(super::ArgType::from("foo"), super::ArgType::Unknown);
         assert_eq!(super::ArgType::from("bar"), super::ArgType::Unknown);
+    }
+
+    #[test]
+    fn build_model_saves_to_cache() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let script_path = test_dir.path().join("myscript.sh");
+        File::create(&script_path)
+            .unwrap()
+            .write_all(b"# @name mycmd\n# @about A test command\n")
+            .unwrap();
+
+        // First build - creates cache
+
+        let _ = super::Model::from(test_dir.path());
+        let cache_path = cache_path_for(test_dir.path()).unwrap();
+        assert!(cache_path.exists(), "cache should be created");
+
+        let cached = super::Model::from_cache(&cache_path, &test_dir.path()).unwrap();
+
+        assert_eq!(
+            cached.commands[0].name(),
+            "mycmd",
+            "cache file should contain the model"
+        );
+
+        std::fs::remove_file(cache_path).unwrap();
+        std::fs::remove_file(script_path).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
+    }
+
+    #[test]
+    fn build_model_loads_from_cache_not_scripts() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let script_path = test_dir.path().join("myscript.sh");
+        File::create(&script_path)
+            .unwrap()
+            .write_all(b"# @name from_script\n# @about Script content\n")
+            .unwrap();
+
+        // Build once to create cache
+        let _ = super::Model::from(test_dir.path());
+        let cache_path = cache_path_for(test_dir.path()).unwrap();
+
+        let other_model =
+            super::Model::new(vec![super::CommandEnum::Script(super::ScriptCommand::new(
+                "from_cache".to_string(),
+                Some("Script content".to_string()),
+                "from_script".into(),
+                vec![],
+                vec![],
+                vec![],
+            ))]);
+
+        other_model.save_to_cache(test_dir.path(), &cache_path);
+
+        // Reload model - should come from cache (modified content), not from script
+        let model = super::Model::from(test_dir.path());
+        assert_eq!(
+            model.commands[0].name(),
+            "from_cache",
+            "model should be loaded from cache; script still has 'from_script'"
+        );
+
+        std::fs::remove_file(cache_path).unwrap();
+        std::fs::remove_file(script_path).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
+    }
+
+    #[test]
+    fn build_model_rebuilds_when_script_newer_than_cache() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let script_path = test_dir.path().join("script.sh");
+        File::create(&script_path)
+            .unwrap()
+            .write_all(b"# @name old\n")
+            .unwrap();
+
+        let _ = super::Model::from(test_dir.path());
+        let cache_path = cache_path_for(test_dir.path()).unwrap();
+        assert!(cache_path.exists());
+
+        // Update script (make it newer than cache)
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        File::create(&script_path)
+            .unwrap()
+            .write_all(b"# @name new\n")
+            .unwrap();
+
+        let model = super::Model::from(test_dir.path());
+        assert_eq!(model.commands[0].name(), "new");
+
+        let cache_path = cache_path_for(test_dir.path()).unwrap();
+
+        // check that the cache has also been updated
+        let cached = super::Model::from_cache(&cache_path, &test_dir.path()).unwrap();
+        assert_eq!(
+            cached.commands[0].name(),
+            "new",
+            "model should be loaded from cache; script still has 'from_script'"
+        );
+
+        std::fs::remove_file(cache_path).unwrap();
+        std::fs::remove_file(script_path).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
     }
 }
