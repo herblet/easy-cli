@@ -12,8 +12,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::builder::build_script_command;
 
-const CACHE_FILE: &str = ".easy-cli";
-
 lazy_static! {
     pub static ref SUB_COMMAND: Regex =
         Regex::new(r"# @sub: *(?P<sub>\w+) *(?P<path>\S.+)?").expect("Failed to compile regex");
@@ -143,11 +141,11 @@ impl Model {
         Model { commands }
     }
 
-    pub fn from_cache(cache_path: &Path) -> Option<Model> {
+    pub fn from_cache(cache_path: &Path, scripts_dir: &Path) -> Option<Model> {
         let file = File::open(cache_path).ok()?;
         let reader = BufReader::new(file);
         let mut model: Model = serde_cbor::from_reader(reader).ok()?;
-        model.resolve_paths(cache_path.parent().unwrap());
+        model.resolve_paths(scripts_dir);
         Some(model)
     }
 
@@ -175,20 +173,10 @@ impl Model {
             cmd.resolve_paths(base_path);
         }
     }
-}
 
-impl<P: AsRef<Path>> From<P> for Model {
-    fn from(path: P) -> Self {
-        let path = path.as_ref().to_path_buf();
-        let cache_path = path.join(CACHE_FILE);
-
-        // Try to load from cache if it exists and is newer than all other files
-        if let Some(model) = try_load_from_cache(&path, &cache_path) {
-            return model;
-        }
-
+    fn build_model_from_scripts(path: &PathBuf) -> Self {
         // Build from scratch
-        let commands = read_dir(&path)
+        let commands = read_dir(path)
             .map(|scripts| {
                 scripts
                     .filter_map(|entry| {
@@ -199,10 +187,6 @@ impl<P: AsRef<Path>> From<P> for Model {
                                     .file_type()
                                     .ok()
                                     .map_or(false, |file_type| file_type.is_file())
-                            })
-                            .filter(|entry| {
-                                // Exclude the cache file itself
-                                entry.path().file_name().map_or(true, |n| n != CACHE_FILE)
                             })
                             .map(|entry| {
                                 let entry_path = entry.path();
@@ -216,43 +200,59 @@ impl<P: AsRef<Path>> From<P> for Model {
                     .collect()
             })
             .unwrap_or(Vec::new());
-        let model = Model::new(commands);
+        Model::new(commands)
+    }
 
-        // Save to cache for next time
-        model.save_to_cache(&path, &cache_path);
+    /// Try to load Model from cache if it exists and is more recent than all other files.
+    fn try_load_from_cache(dir_path: &Path, cache_path: &Path) -> Option<Self> {
+        let cache_meta = std::fs::metadata(cache_path).ok()?;
+        if !cache_meta.is_file() {
+            return None;
+        }
+        let cache_mtime = cache_meta.modified().ok()?;
+
+        // Check that cache is newer than all files in the scripts directory
+        let entries = read_dir(dir_path).ok()?;
+        for entry in entries.filter_map(Result::ok) {
+            if let Ok(ft) = entry.file_type() {
+                if ft.is_file() {
+                    if let Ok(entry_mtime) = entry.metadata().and_then(|m| m.modified()) {
+                        if entry_mtime > cache_mtime {
+                            return None; // A file is newer than cache, rebuild
+                        }
+                    }
+                }
+            }
+        }
+
+        // Load from cache
+        Model::from_cache(cache_path, dir_path)
+    }
+
+    fn cached_or_build(path: PathBuf) -> Self {
+        let cache_path = crate::utils::cache_path_for(&path);
+
+        if let Some(cp) = &cache_path {
+            if let Some(model) = Model::try_load_from_cache(&path, cp) {
+                return model;
+            }
+        }
+
+        let model = Model::build_model_from_scripts(&path);
+
+        if let Some(cp) = &cache_path {
+            model.save_to_cache(&path, cp);
+        }
 
         model
     }
 }
 
-/// Try to load Model from cache if it exists and is more recent than all other files.
-fn try_load_from_cache(dir_path: &Path, cache_path: &Path) -> Option<Model> {
-    let cache_meta = std::fs::metadata(cache_path).ok()?;
-    if !cache_meta.is_file() {
-        return None;
+impl<P: AsRef<Path>> From<P> for Model {
+    fn from(path: P) -> Self {
+        let path = path.as_ref().to_path_buf();
+        Model::cached_or_build(path)
     }
-    let cache_mtime = cache_meta.modified().ok()?;
-
-    // Check that cache is newer than all other files in the directory
-    let entries = read_dir(dir_path).ok()?;
-    for entry in entries.filter_map(Result::ok) {
-        let entry_path = entry.path();
-        if entry_path.file_name().map_or(true, |n| n == CACHE_FILE) {
-            continue;
-        }
-        if let Ok(ft) = entry.file_type() {
-            if ft.is_file() {
-                if let Ok(entry_mtime) = entry.metadata().and_then(|m| m.modified()) {
-                    if entry_mtime > cache_mtime {
-                        return None; // A file is newer than cache, rebuild
-                    }
-                }
-            }
-        }
-    }
-
-    // Load from cache
-    Model::from_cache(cache_path)
 }
 
 impl HasSubCommands for Model {
@@ -528,6 +528,8 @@ pub(crate) mod test {
     use std::fs::File;
     use std::io::Write;
 
+    use crate::utils::cache_path_for;
+
     use super::Command;
 
     pub const NO_DESCRIPTION: Option<String> = None;
@@ -558,6 +560,11 @@ pub(crate) mod test {
         names.sort();
 
         assert_eq!(names.join(","), "script1,script2");
+
+        std::fs::remove_file(script1_path).unwrap();
+        std::fs::remove_file(script2_path).unwrap();
+        std::fs::remove_file(cache_path_for(test_dir.path()).unwrap()).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
     }
 
     #[test]
@@ -583,6 +590,11 @@ pub(crate) mod test {
 
         assert_eq!(model.commands.len(), 1);
         assert_eq!(model.commands[0].name(), "script1");
+
+        std::fs::remove_file(script1_path).unwrap();
+        std::fs::remove_dir(subdir_path).unwrap();
+        std::fs::remove_file(cache_path_for(test_dir.path()).unwrap()).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
     }
 
     #[test]
@@ -610,6 +622,10 @@ pub(crate) mod test {
         names.sort();
 
         assert_eq!(names.join(","), "sub1,sub2");
+
+        std::fs::remove_file(script1_path).unwrap();
+        std::fs::remove_file(cache_path_for(test_dir.path()).unwrap()).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
     }
 
     #[test]
@@ -646,6 +662,11 @@ pub(crate) mod test {
         names.sort();
 
         assert_eq!(names.join(","), "sub1,sub2");
+
+        std::fs::remove_file(script1_path).unwrap();
+        std::fs::remove_file(script2_path).unwrap();
+        std::fs::remove_file(cache_path_for(test_dir.path()).unwrap()).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
     }
 
     #[test]
@@ -672,17 +693,22 @@ pub(crate) mod test {
             .unwrap();
 
         // First build - creates cache
-        let _ = super::Model::from(test_dir.path());
-        let cache_path = test_dir.path().join(super::CACHE_FILE);
-        assert!(cache_path.exists(), ".easy-cli cache should be created");
 
-        let cached = super::Model::from_cache(&cache_path).unwrap();
+        let _ = super::Model::from(test_dir.path());
+        let cache_path = cache_path_for(test_dir.path()).unwrap();
+        assert!(cache_path.exists(), "cache should be created");
+
+        let cached = super::Model::from_cache(&cache_path, &test_dir.path()).unwrap();
 
         assert_eq!(
             cached.commands[0].name(),
             "mycmd",
             "cache file should contain the model"
         );
+
+        std::fs::remove_file(cache_path).unwrap();
+        std::fs::remove_file(script_path).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
     }
 
     #[test]
@@ -696,7 +722,7 @@ pub(crate) mod test {
 
         // Build once to create cache
         let _ = super::Model::from(test_dir.path());
-        let cache_path = test_dir.path().join(super::CACHE_FILE);
+        let cache_path = cache_path_for(test_dir.path()).unwrap();
 
         let other_model =
             super::Model::new(vec![super::CommandEnum::Script(super::ScriptCommand::new(
@@ -717,6 +743,10 @@ pub(crate) mod test {
             "from_cache",
             "model should be loaded from cache; script still has 'from_script'"
         );
+
+        std::fs::remove_file(cache_path).unwrap();
+        std::fs::remove_file(script_path).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
     }
 
     #[test]
@@ -729,7 +759,7 @@ pub(crate) mod test {
             .unwrap();
 
         let _ = super::Model::from(test_dir.path());
-        let cache_path = test_dir.path().join(super::CACHE_FILE);
+        let cache_path = cache_path_for(test_dir.path()).unwrap();
         assert!(cache_path.exists());
 
         // Update script (make it newer than cache)
@@ -742,14 +772,18 @@ pub(crate) mod test {
         let model = super::Model::from(test_dir.path());
         assert_eq!(model.commands[0].name(), "new");
 
-        let cache_path = test_dir.path().join(super::CACHE_FILE);
+        let cache_path = cache_path_for(test_dir.path()).unwrap();
 
         // check that the cache has also been updated
-        let cached = super::Model::from_cache(&cache_path).unwrap();
+        let cached = super::Model::from_cache(&cache_path, &test_dir.path()).unwrap();
         assert_eq!(
             cached.commands[0].name(),
             "new",
             "model should be loaded from cache; script still has 'from_script'"
         );
+
+        std::fs::remove_file(cache_path).unwrap();
+        std::fs::remove_file(script_path).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
     }
 }

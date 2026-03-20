@@ -362,7 +362,14 @@ fn default_name(path: &PathBuf) -> String {
 }
 
 pub fn build_script_command(path: PathBuf) -> Result<Option<ScriptCommand>, String> {
-    let mut file_content = std::fs::read_to_string(&path).unwrap();
+    let file_result = std::fs::read_to_string(&path);
+
+    // If the file can't be read it is probably binary; ignore it rather than erroring
+    if file_result.is_err() {
+        return Ok(None);
+    }
+
+    let mut file_content = file_result.unwrap();
 
     // Until streaming is implemented properly and we can handle incomplete, make sure the file
     // ends with a newline, otherwise we may miss the last tag
